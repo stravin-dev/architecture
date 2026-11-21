@@ -1,3 +1,31 @@
+/* Full-width layout on wider screens while keeping side rails and mobile intact */
+.md-grid {
+  max-width: 100%;
+}
+
+@media screen and (min-width: 60em) {
+  .md-grid {
+    padding-inline: 1rem;
+  }
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-grid {
+    padding-inline: 1.5rem;
+  }
+}
+
+/* Expand tables to use full available body width without breaking mobile scroll */
+.md-typeset__table {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.md-typeset table:not([class]) {
+  width: 100%;
+}
+
 /* Theme-adaptive surface variables for diagrams and tables */
 [data-md-color-scheme="default"] {
   --stravin-diagram-bg: #f8fafc;
@@ -10,6 +38,8 @@
 }
 
 .md-typeset .mermaid {
+  width: 100%;
+  box-sizing: border-box;
   background-color: var(--stravin-diagram-bg);
   border: 1px solid var(--stravin-diagram-border);
   border-radius: 0.4rem;
