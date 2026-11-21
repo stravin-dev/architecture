@@ -14,6 +14,10 @@ nav = [
     { "Server-Side Wasm Hooks" = "core/hooks.md" },
     { "Isolation & Multi-Tenancy" = "core/isolation-multitenancy.md" },
   ] },
+  { "Operations & Tooling" = [
+    { "Local Development" = "operations/local-dev.md" },
+    { "Telemetry & Observability" = "operations/telemetry.md" },
+  ] },
 ]
 
 [project.theme]

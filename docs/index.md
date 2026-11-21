@@ -56,3 +56,8 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 - [Performance & Throughput Scaling](core/performance.md) — Single-repository throughput ceilings across workload regimes, DynamoDB and S3 bottleneck math, tiered LSM compaction, and shard read fan-out mitigation.
 - [Server-Side Hooks](core/hooks.md) — Three-tier hook architecture combining synchronous `wazero` WebAssembly gates overlapped with S3 uploads, DynamoDB Streams transactional outbox for async hooks, `HookHostABI`, and resource guardrails.
 - [Sandboxed Execution & Multi-Tenancy](core/isolation-multitenancy.md) — Linux namespace/cgroup v2 sandboxing vs. tenant-pinned microVMs, Git config lockdown, multi-tenant performance impact, avoiding orders-of-magnitude traps, and Day-1 architectural seams.
+
+## Operations & Tooling
+
+- [Local Development](operations/local-dev.md) — Docker Compose local development stack using Floci for AWS emulation (S3, DynamoDB, Streams, KMS), bootstrap workflow, and the upstream Floci PR policy for missing AWS features.
+- [Telemetry & Observability](operations/telemetry.md) — Full OpenTelemetry and Grafana LGTM (Loki, Grafana, Tempo, Prometheus) architecture, end-to-end distributed trace flows, attribute/cardinality guardrails, and Golden Signals dashboards.
