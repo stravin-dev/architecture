@@ -1,0 +1,24 @@
+/* Theme-adaptive surface variables for diagrams and tables */
+[data-md-color-scheme="default"] {
+  --stravin-diagram-bg: #f8fafc;
+  --stravin-diagram-border: #e2e8f0;
+}
+
+[data-md-color-scheme="slate"] {
+  --stravin-diagram-bg: #1e222b;
+  --stravin-diagram-border: #334155;
+}
+
+.md-typeset .mermaid {
+  background-color: var(--stravin-diagram-bg);
+  border: 1px solid var(--stravin-diagram-border);
+  border-radius: 0.4rem;
+  padding: 1rem;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-typeset .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
