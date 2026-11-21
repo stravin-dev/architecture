@@ -1,3 +1,28 @@
+/* Stravin Brand Tokens */
+:root {
+  /* Core Surfaces & Inks */
+  --stravin-basalt-950: #0E1116;
+  --stravin-slate-900: #161B22;
+  --stravin-slate-800: #252D38;
+  --stravin-limestone-50: #F7F6F2;
+  --stravin-limestone-100: #EAE7DF;
+  --stravin-limestone-200: #D5D0C5;
+  --stravin-ink-900: #14181F;
+  --stravin-slate-400: #93A0B0;
+  --stravin-ink-500: #525C68;
+
+  /* Isometric Mineral Teal Scale & Focal Accent */
+  --stravin-glacier-mint: #64C5B9;
+  --stravin-strata-teal: #2A9D8F;
+  --stravin-abyss-teal: #1C6E66;
+  --stravin-rivet-terracotta: #E06D53;
+
+  /* Product Layer Accents */
+  --stravin-blueprint-blue: #5B8DEF;
+  --stravin-ochre-amber: #D4A34B;
+  --stravin-forged-steel: #7A8B99;
+}
+
 /* Full-width layout on wider screens while keeping side rails and mobile intact */
 .md-grid {
   max-width: 100%;
@@ -26,15 +51,49 @@
   width: 100%;
 }
 
-/* Theme-adaptive surface variables for diagrams and tables */
+/* Theme-adaptive Stravin palette tokens for light and dark schemes */
 [data-md-color-scheme="default"] {
-  --stravin-diagram-bg: #f8fafc;
-  --stravin-diagram-border: #e2e8f0;
+  --md-default-bg-color: var(--stravin-limestone-50);
+  --md-default-fg-color: var(--stravin-ink-900);
+  --md-default-fg-color--light: var(--stravin-ink-500);
+  --md-default-fg-color--lighter: rgba(20, 24, 31, 0.32);
+  --md-default-fg-color--lightest: var(--stravin-limestone-200);
+  --md-primary-fg-color: var(--stravin-strata-teal);
+  --md-primary-fg-color--light: var(--stravin-glacier-mint);
+  --md-primary-fg-color--dark: var(--stravin-abyss-teal);
+  --md-primary-bg-color: var(--stravin-limestone-50);
+  --md-accent-fg-color: var(--stravin-rivet-terracotta);
+  --md-accent-fg-color--transparent: rgba(224, 109, 83, 0.12);
+  --md-typeset-color: var(--stravin-ink-900);
+  --md-typeset-a-color: var(--stravin-abyss-teal);
+  --md-code-bg-color: var(--stravin-limestone-100);
+  --md-code-fg-color: var(--stravin-ink-900);
+  --md-footer-bg-color: var(--stravin-limestone-100);
+  --md-footer-bg-color--dark: var(--stravin-limestone-200);
+  --stravin-diagram-bg: var(--stravin-limestone-100);
+  --stravin-diagram-border: var(--stravin-limestone-200);
 }
 
 [data-md-color-scheme="slate"] {
-  --stravin-diagram-bg: #1e222b;
-  --stravin-diagram-border: #334155;
+  --md-default-bg-color: var(--stravin-basalt-950);
+  --md-default-fg-color: var(--stravin-limestone-50);
+  --md-default-fg-color--light: var(--stravin-slate-400);
+  --md-default-fg-color--lighter: rgba(247, 246, 242, 0.32);
+  --md-default-fg-color--lightest: var(--stravin-slate-800);
+  --md-primary-fg-color: var(--stravin-strata-teal);
+  --md-primary-fg-color--light: var(--stravin-glacier-mint);
+  --md-primary-fg-color--dark: var(--stravin-abyss-teal);
+  --md-primary-bg-color: var(--stravin-limestone-50);
+  --md-accent-fg-color: var(--stravin-rivet-terracotta);
+  --md-accent-fg-color--transparent: rgba(224, 109, 83, 0.14);
+  --md-typeset-color: var(--stravin-limestone-50);
+  --md-typeset-a-color: var(--stravin-glacier-mint);
+  --md-code-bg-color: var(--stravin-slate-900);
+  --md-code-fg-color: var(--stravin-limestone-50);
+  --md-footer-bg-color: var(--stravin-slate-900);
+  --md-footer-bg-color--dark: var(--stravin-basalt-950);
+  --stravin-diagram-bg: var(--stravin-slate-900);
+  --stravin-diagram-border: var(--stravin-slate-800);
 }
 
 .md-typeset .mermaid {
