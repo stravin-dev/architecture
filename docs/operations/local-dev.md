@@ -233,27 +233,45 @@ Floci's S3 bucket replication (`PutBucketReplication`) is configuration-only (no
 ### Dual-Floci Topology
 
 ```mermaid
-flowchart LR
-    subgraph RegionA["Region A (us-east-1)"]
+flowchart TB
+    ClientA["Git Client (Region A)"] --> EdgeA
+    ClientB["Git Client (Region B)"] --> EdgeB
+
+    subgraph RegionA["Region A (us-east-1 — Home Region)"]
+        EdgeA["stravin-edge-a (:2222 / :8080)"]
+        NodeA["stravin-node-a"]
+        CtrlA["stravin-ctrl-a"]
         FlociA[("floci-region-a (:4566)\nS3 | SQS | DynamoDB | Streams | KMS")]
-        NodeA["stravin-node-a\n(Home Region)"]
+
+        EdgeA --> NodeA
+        NodeA <--> FlociA
+        CtrlA <--> FlociA
     end
 
-    subgraph SyncTools["Floci Test Sync Tools (stravin-dev/core)"]
-        S3Sync["floci-test-s3-sync\n(SQS -> GetObject/PutObject + Lag)"]
-        DDBSync["floci-test-ddb-sync\n(Streams -> PutItem/DeleteItem + LWW)"]
+    subgraph SyncServices["Floci Test Sync Services (stravin-dev/core)"]
+        S3Sync["floci-test-s3-sync\n(S3->SQS -> GetObject/PutObject + Lag)"]
+        DDBSync["floci-test-ddb-sync\n(DDB Streams -> PutItem/DeleteItem + LWW)"]
     end
 
-    subgraph RegionB["Region B (us-west-2)"]
+    subgraph RegionB["Region B (us-west-2 — Secondary Region)"]
+        EdgeB["stravin-edge-b (:2223 / :8081)"]
+        NodeB["stravin-node-b"]
+        CtrlB["stravin-ctrl-b"]
         FlociB[("floci-region-b (:4567)\nS3 | SQS | DynamoDB | Streams | KMS")]
-        NodeB["stravin-node-b\n(Secondary Region)"]
+
+        EdgeB -->|"Local Reads"| NodeB
+        NodeB <--> FlociB
+        CtrlB <--> FlociB
     end
 
-    NodeA <--> FlociA
-    NodeB <--> FlociB
-    FlociA -- "S3->SQS Event" --> S3Sync -- "Delayed PutObject" --> FlociB
-    FlociA -- "DynamoDB Stream" --> DDBSync -- "Async PutItem/DeleteItem" --> FlociB
+    EdgeB -. "Write Proxy (Push)" .-> NodeA
     NodeB -. "404 Fallback GetObject" .-> FlociA
+
+    FlociA <-->|"S3->SQS + Loop Guard"| S3Sync
+    S3Sync <-->|"Delayed PutObject"| FlociB
+
+    FlociA <-->|"DDB Streams + LWW"| DDBSync
+    DDBSync <-->|"Async PutItem / DeleteItem"| FlociB
 ```
 
 ### Dedicated Floci Test Tools in `stravin-dev/core`
@@ -273,6 +291,56 @@ In multi-region Compose profiles, both `floci-region-a` (`us-east-1`) and `floci
 
 1. Create a local SQS queue (for example, `floci-test-s3-sync-queue`) in each Floci instance.
 2. Attach `PutBucketNotificationConfiguration` on `git-objects-{region}` forwarding `s3:ObjectCreated:*` (and optionally `s3:ObjectRemoved:*`) to that queue.
+
+### Reference Multi-Region Compose Wiring
+
+Each sync service runs one directional worker per replication direction (`a-to-b` and, after failover, `b-to-a`). The loop guards prevent ping-pong when both directions run concurrently:
+
+```yaml
+services:
+  floci-region-a:
+    image: floci/floci:2.5.0
+    ports: ["4566:4566"]
+    environment:
+      FLOCI_SERVICES: "s3,sqs,dynamodb,dynamodbstreams,kms"
+      FLOCI_DEFAULT_REGION: "us-east-1"
+
+  floci-region-b:
+    image: floci/floci:2.5.0
+    ports: ["4567:4566"]
+    environment:
+      FLOCI_SERVICES: "s3,sqs,dynamodb,dynamodbstreams,kms"
+      FLOCI_DEFAULT_REGION: "us-west-2"
+
+  floci-test-s3-sync-a-to-b:
+    build: { context: ., dockerfile: Dockerfile.floci-test, target: floci-test-s3-sync }
+    depends_on:
+      floci-init-a: { condition: service_completed_successfully }
+      floci-init-b: { condition: service_completed_successfully }
+    environment:
+      FLOCI_SYNC_SOURCE_ENDPOINT: "http://floci-region-a:4566"
+      FLOCI_SYNC_SOURCE_REGION: "us-east-1"
+      FLOCI_SYNC_SOURCE_BUCKET: "git-objects-us-east-1"
+      FLOCI_SYNC_SOURCE_QUEUE_URL: "http://floci-region-a:4566/000000000000/floci-test-s3-sync-queue"
+      FLOCI_SYNC_TARGET_ENDPOINT: "http://floci-region-b:4566"
+      FLOCI_SYNC_TARGET_REGION: "us-west-2"
+      FLOCI_SYNC_TARGET_BUCKET: "git-objects-us-west-2"
+      FLOCI_SYNC_LAG_DELAY: "2s"
+
+  floci-test-ddb-sync-a-to-b:
+    build: { context: ., dockerfile: Dockerfile.floci-test, target: floci-test-ddb-sync }
+    depends_on:
+      floci-init-a: { condition: service_completed_successfully }
+      floci-init-b: { condition: service_completed_successfully }
+    environment:
+      FLOCI_SYNC_SOURCE_ENDPOINT: "http://floci-region-a:4566"
+      FLOCI_SYNC_SOURCE_REGION: "us-east-1"
+      FLOCI_SYNC_SOURCE_TABLE: "stravin-core"
+      FLOCI_SYNC_TARGET_ENDPOINT: "http://floci-region-b:4566"
+      FLOCI_SYNC_TARGET_REGION: "us-west-2"
+      FLOCI_SYNC_TARGET_TABLE: "stravin-core"
+      FLOCI_SYNC_LAG_DELAY: "100ms"
+```
 
 ### Reproducible Failure & Lag Scenarios
 
