@@ -54,7 +54,7 @@ Choosing MRSC would directly violate Stravin's requirement of zero home-region w
 
 ## Adaptive Key-Sharded DynamoDB Schema
 
-Each physical DynamoDB partition enforces a hard limit of **1,000 WCU/sec**. Placing all references or a single repository version counter under one partition key creates a hot-partition bottleneck for agent-scale monorepos. Stravin Core avoids this through **adaptive key sharding** (`ref_shards` $S \in [1, 64]$, `manifest_shards` $M \in [1, 32]$) prefixed by `tenant_id`:
+Each physical DynamoDB partition enforces a hard limit of **1,000 WCU/sec**. Placing all references or a single repository version counter under one partition key creates a hot-partition bottleneck for agent-scale monorepos. Stravin Core avoids this through **adaptive key sharding** (`ref_shards` `S ∈ [1, 64]`, `manifest_shards` `M ∈ [1, 32]`) prefixed by `tenant_id`:
 
 | Entity | Partition Key (`PK`) | Sort Key (`SK`) | Key Attributes |
 | :--- | :--- | :--- | :--- |

@@ -77,7 +77,7 @@ type HookHostABI interface {
 }
 ```
 
-Unifying Git's `pre-receive` and `update` semantics into a single Wasm invocation that returns either a global decision or per-ref verdicts avoids invoking the runtime $N$ times on multi-branch pushes.
+Unifying Git's `pre-receive` and `update` semantics into a single Wasm invocation that returns either a global decision or per-ref verdicts avoids invoking the runtime `N` times on multi-branch pushes.
 
 ## Async Hooks: Transactional Outbox via DynamoDB Streams
 

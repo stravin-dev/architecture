@@ -1,18 +1,18 @@
 # Performance & Throughput Scaling
 
-Single-repository commit throughput depends on two primary variables: whether pushes target **one shared branch** (such as `main`) or **many independent branches** (agent-scale workloads), and how many commits $K$ are batched per push ($\text{commits/sec} = K \times \text{pushes/sec}$).
+Single-repository commit throughput depends on two primary variables: whether pushes target **one shared branch** (such as `main`) or **many independent branches** (agent-scale workloads), and how many commits `K` are batched per push (`commits/sec = K × pushes/sec`).
 
 With a sharded S3 prefix and shard-distributed Go writers, Stravin Core reaches **~6,666 multi-branch pushes/sec** on default DynamoDB quotas and **16,000–32,000 pushes/sec** theoretically with raised quotas—sustaining **5,000–10,000 pushes/sec** (tens of thousands of commits/sec) in practice on a single repository before compaction and cross-region replication bandwidth become the dominant engineering limits. This places Stravin Core in the same tier as GitHub's Project Rubicon internal benchmarks (7,200 pushes/sec across 5,000 concurrent agents) and well beyond single-manifest S3 designs (~120–300 pushes/sec).
 
 ## Workload Regimes & Throughput Ceilings
 
-| Workload Regime | Theoretical Push Ceiling (1 commit/push) | Effective Commits/sec ($K$-commit batching) | Binding Bottleneck |
+| Workload Regime | Theoretical Push Ceiling (1 commit/push) | Effective Commits/sec (`K`-commit batching) | Binding Bottleneck |
 | :--- | :--- | :--- | :--- |
-| **Single-Ref Direct (`main`, unserialized clients)** | **5–20 / sec** | 50–200 / sec ($K = 10$) | Git non-fast-forward CAS retry storms + client rebase RTT |
-| **Single-Ref Serialized (server-side merge queue)** | **100–200 / sec** | **5,000–20,000+ / sec** ($K = 50\text{–}100$) | Single-item DynamoDB `TransactWriteItems` 2PC latency (~5–10 ms) & `TransactionConflictException` |
-| **Multi-Ref (Unsharded S3 Prefix)** | **~1,750 / sec** | 17,500+ / sec ($K = 10$) | Single S3 prefix `PUT` ceiling (3,500 PUT/s $\div$ 2 objects/push) |
-| **Multi-Ref (Sharded S3 Prefix, Default AWS Quotas)** | **~6,666 / sec** | 66,600+ / sec ($K = 10$) | Default DynamoDB table quota (40,000 WCU/s $\div$ 6 WCU/push) |
-| **Multi-Ref (Sharded S3 + Raised Quotas + Tiered Compaction)** | **16,000–32,000 / sec** | **160,000+ / sec** ($K = 10$) | Manifest shard count ($M \times 500$), compaction CPU, and reader scatter-gather fan-out |
+| **Single-Ref Direct (`main`, unserialized clients)** | **5–20 / sec** | 50–200 / sec (`K = 10`) | Git non-fast-forward CAS retry storms + client rebase RTT |
+| **Single-Ref Serialized (server-side merge queue)** | **100–200 / sec** | **5,000–20,000+ / sec** (`K = 50–100`) | Single-item DynamoDB `TransactWriteItems` 2PC latency (~5–10 ms) & `TransactionConflictException` |
+| **Multi-Ref (Unsharded S3 Prefix)** | **~1,750 / sec** | 17,500+ / sec (`K = 10`) | Single S3 prefix `PUT` ceiling (3,500 PUT/s ÷ 2 objects/push) |
+| **Multi-Ref (Sharded S3 Prefix, Default AWS Quotas)** | **~6,666 / sec** | 66,600+ / sec (`K = 10`) | Default DynamoDB table quota (40,000 WCU/s ÷ 6 WCU/push) |
+| **Multi-Ref (Sharded S3 + Raised Quotas + Tiered Compaction)** | **16,000–32,000 / sec** | **160,000+ / sec** (`K = 10`) | Manifest shard count (`M × 500`), compaction CPU, and reader scatter-gather fan-out |
 
 ## Layer-by-Layer Bottleneck Math
 
@@ -28,7 +28,7 @@ A standard single-ref push writes three small items across three partition keys:
 
 Total cost: **6 WCU per push**, yielding three distinct ceilings:
 
-- **Per-Ref Contention Ceiling (Single Branch):** Although one partition supports 500 transactional writes/sec ($1{,}000 \div 2$), concurrent transactions targeting the *same item* abort with `TransactionConflictException`. Serializing `main` updates through a single coordinator (such as Stravin Gate) caps single-ref pushes at roughly `1 / tx_latency`, or **100–200 pushes/sec** at 5–10 ms per transaction.
+- **Per-Ref Contention Ceiling (Single Branch):** Although one partition supports 500 transactional writes/sec (`1,000 ÷ 2`), concurrent transactions targeting the *same item* abort with `TransactionConflictException`. Serializing `main` updates through a single coordinator (such as Stravin Gate) caps single-ref pushes at roughly `1 / tx_latency`, or **100–200 pushes/sec** at 5–10 ms per transaction.
 - **Default Table Quota Ceiling:** A default DynamoDB table quota of **40,000 WCU/sec** caps a single repository at:
 
 ```text
@@ -36,13 +36,13 @@ Total cost: **6 WCU per push**, yielding three distinct ceilings:
 ```
 
   AWS Service Quotas can raise table limits to hundreds of thousands or millions of WCUs; on-demand tables should configure `WarmThroughput` to absorb sudden agent spikes without throttling.
-- **Shard-Count Ceiling:** With $S = 64$ ref shards and $M = 32$ manifest shards (each sustaining 500 tx/sec), the tighter dimension ($M = 32$) caps single-repo throughput at:
+- **Shard-Count Ceiling:** With `S = 64` ref shards and `M = 32` manifest shards (each sustaining 500 tx/sec), the tighter dimension (`M = 32`) caps single-repo throughput at:
 
 ```text
 32 manifest shards × 500 tx/sec = 16,000 pushes/sec
 ```
 
-  Raising $M$ to 64 increases the theoretical DynamoDB ceiling to **32,000 pushes/sec**.
+  Raising `M` to 64 increases the theoretical DynamoDB ceiling to **32,000 pushes/sec**.
 
 ### 2. S3 Pack Plane & Prefix Sharding
 
@@ -75,7 +75,7 @@ permanently removing S3 `PUT` rates as a single-repository bottleneck.
 Routing all writes for a hot repository to a single `stravin-node` via `hash(tenant_id, repo_id)` saturates compute well below storage limits:
 
 - **Subprocess overhead:** Forking `git index-pack` on every push incurs OS process spawn, disk `fsync`, and local repo lock contention, saturating a 64-vCPU host around **300–800 pushes/sec**.
-- **Horizontal write scaling:** Routing hot repositories by `hash(tenant_id, repo_id, ref_shard)` spreads writes across $N$ stateless `stravin-node` workers with zero inter-node coordination—every writer still enforces linearizability through DynamoDB Ref-CAS. Replacing `git index-pack` subprocesses with an in-process streaming Go packfile validator/indexer eliminates fork/exec overhead and lets each node saturate network I/O instead of process scheduling.
+- **Horizontal write scaling:** Routing hot repositories by `hash(tenant_id, repo_id, ref_shard)` spreads writes across `N` stateless `stravin-node` workers with zero inter-node coordination—every writer still enforces linearizability through DynamoDB Ref-CAS. Replacing `git index-pack` subprocesses with an in-process streaming Go packfile validator/indexer eliminates fork/exec overhead and lets each node saturate network I/O instead of process scheduling.
 
 ## Practical Ceilings: Compaction, Read Fan-Out & Bandwidth
 
@@ -90,7 +90,7 @@ At 5,000 pushes/sec, a single repository generates **300,000 new packfiles per m
 
 ### 2. Shard Read-Fan-Out Tax
 
-Sharding DynamoDB across $S = 64$ ref shards and $M = 32$ manifest shards unlocks 16,000+ writes/sec, but a cold reader polling all shards must scatter-gather across up to **96 DynamoDB partitions** and wait for p99 tail latency. To keep `git fetch` and `git clone` fast, `stravin-node` instances consume a **DynamoDB Streams fan-out** (or a lightweight Go in-memory manifest aggregator) to stay incrementally synced instead of polling all $S + M$ shards on every read.
+Sharding DynamoDB across `S = 64` ref shards and `M = 32` manifest shards unlocks 16,000+ writes/sec, but a cold reader polling all shards must scatter-gather across up to **96 DynamoDB partitions** and wait for p99 tail latency. To keep `git fetch` and `git clone` fast, `stravin-node` instances consume a **DynamoDB Streams fan-out** (or a lightweight Go in-memory manifest aggregator) to stay incrementally synced instead of polling all `S + M` shards on every read.
 
 ### 3. Pack-Size Bandwidth Ceiling
 
