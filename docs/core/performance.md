@@ -106,5 +106,6 @@ At multi-gigabyte-per-second rates, VPC S3 endpoint throughput and S3 CRR replic
 ## Related Documents
 
 - [Storage Layer: S3 & DynamoDB](storage.md) — Sharded S3 prefixes and DynamoDB partition keys.
+- [Service Scaling](../operations/scaling.md) — Horizontal and vertical scaling playbooks and telemetry triggers for each Stravin Go daemon.
 - [Server-Side Hooks](hooks.md) — Keeping push throughput intact while executing synchronous hooks.
 - [Sandboxed Execution & Multi-Tenancy](isolation-multitenancy.md) — Multi-tenancy performance delta by layer.

@@ -61,3 +61,5 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 
 - [Local Development](operations/local-dev.md) — Docker Compose local development stack using Floci for AWS emulation (S3, DynamoDB, Streams, KMS), bootstrap workflow, and the upstream Floci PR policy for missing AWS features.
 - [Telemetry & Observability](operations/telemetry.md) — Full OpenTelemetry and Grafana LGTM (Loki, Grafana, Tempo, Prometheus) architecture, end-to-end distributed trace flows, attribute/cardinality guardrails, and Golden Signals dashboards.
+- [Service Scaling](operations/scaling.md) — Horizontal vs. vertical scaling playbooks for all five Go daemons, telemetry-driven scale-out/scale-in triggers, graceful drain behavior, and anti-thrashing guardrails.
+- [Zero-Downtime Deployment](operations/deployment.md) — Tool-agnostic Kubernetes rollout strategy covering N/N-1 compatibility, 4-wave regional ordering (rolling and canary), multi-region progression, and telemetry-gated rollbacks.

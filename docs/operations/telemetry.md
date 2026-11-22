@@ -151,6 +151,7 @@ Every Stravin deployment ships a baseline Grafana dashboard suite organized arou
 ## Related Documents
 
 - [Local Development with Docker Compose & Floci](local-dev.md) — Running the optional `--profile telemetry` LGTM stack alongside Floci.
+- [Service Scaling](scaling.md) — Using these OpenTelemetry and Prometheus signals to scale each Stravin Go daemon up/out and down/in.
 - [System Topology & Request Flows](../core/topology.md) — Multi-region request paths traced by `stravin-edge`, `stravin-node`, `stravin-pack`, and `stravin-ctrl`.
 - [Server-Side Hooks](../core/hooks.md) — Concurrent S3 + `wazero` execution model and DynamoDB Streams outbox traced into `stravin-hook`.
 - [Storage Layer: S3 & DynamoDB](../core/storage.md) — Shard keys (`ref_shard`, `manifest_shard`) and `Ref History` schema carrying trace context.

@@ -68,3 +68,4 @@ By separating object durability (S3) from reference linearization (DynamoDB) and
 
 - [Storage Layer: S3 & DynamoDB](storage.md) — S3 CRR + RTC and DynamoDB MREC configuration.
 - [System Topology & Request Flows](topology.md) — `stravin-ctrl` and `stravin-edge` write-proxy routing.
+- [Zero-Downtime Deployment](../operations/deployment.md) — Multi-region rollout progression and standby-first `stravin-ctrl` upgrades.
