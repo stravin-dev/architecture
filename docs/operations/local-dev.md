@@ -62,7 +62,7 @@ Stravin Core depends on a tight, well-defined slice of AWS APIs. The table below
 | **Amazon DynamoDB** | Adaptive key-sharded tables (`PK`/`SK`), `TransactWriteItems` atomic Ref-CAS + Ref History + Pack Manifest commits, conditional expressions (`oid = :old_oid`, `attribute_not_exists(oid)`), and TTL on `Ref History`. | Bootstrap creates the `stravin-core` table with `PK` (String) and `SK` (String) plus TTL enabled on the `ttl` attribute. Daemons use standard AWS SDK v2 `TransactWriteItems` and `Query` calls against Floci. |
 | **DynamoDB Streams** | Transactional outbox emitting `Ref History` inserts to `stravin-hook` for Tier 2 asynchronous post-receive hooks and webhooks. | Enable `StreamSpecification` (`NEW_IMAGE`) on the `stravin-core` table at bootstrap. `stravin-hook` polls `DescribeStream`, `GetShardIterator`, and `GetRecords` directly from Floci. |
 | **AWS KMS** | Envelope encryption data-encryption keys (DEKs) via `GenerateDataKey` and `Decrypt` for per-tenant secrets, webhook signing keys, and encrypted metadata. | Bootstrap creates a local symmetric KMS key and alias (`alias/stravin-local-dev`) in Floci, exposing its ARN to daemons via `STRAVIN_KMS_KEY_ID`. |
-| **Multi-Region Emulation** | S3 CRR + RTC lag, DynamoDB Global Tables (MREC) async replication, `404 NoSuchKey` origin fallback, and `failover_epoch` fencing. | Default single-region profile runs one Floci instance (`us-east-1`). Multi-region test scenarios run two regional Floci endpoints (`floci-region-a` and `floci-region-b`) with a lightweight local replicator or fault-injection proxy that delays S3 copy relative to DynamoDB replication to exercise metadata-before-blob fallback paths. |
+| **Multi-Region Emulation** | S3 CRR + RTC lag, DynamoDB Global Tables (MREC) async replication, `404 NoSuchKey` origin fallback, and `failover_epoch` fencing. | Default single-region profile runs one Floci instance (`us-east-1`). Multi-region test scenarios run two regional Floci endpoints (`floci-region-a` and `floci-region-b`) bridged by two standalone Floci test sync tools (`floci-test-s3-sync` and `floci-test-ddb-sync`) as detailed in [Multi-Region Local Testing with Dual Floci](#multi-region-local-testing-with-dual-floci). |
 
 ### Local Bootstrap Sequence
 
@@ -225,6 +225,62 @@ services:
 volumes:
   node-nvme-cache:
 ```
+
+## Multi-Region Local Testing with Dual Floci
+
+Floci's S3 bucket replication (`PutBucketReplication`) is configuration-only (no objects are copied), and Floci does not asynchronously replicate DynamoDB writes across separate regional containers. To validate Stravin Core's multi-region consistency model locally with zero real AWS resources, multi-region test suites run **two regional Floci instances** bridged by **two standalone Floci test tools** maintained in `stravin-dev/core`.
+
+### Dual-Floci Topology
+
+```mermaid
+flowchart LR
+    subgraph RegionA["Region A (us-east-1)"]
+        FlociA[("floci-region-a (:4566)\nS3 | SQS | DynamoDB | Streams | KMS")]
+        NodeA["stravin-node-a\n(Home Region)"]
+    end
+
+    subgraph SyncTools["Floci Test Sync Tools (stravin-dev/core)"]
+        S3Sync["floci-test-s3-sync\n(SQS -> GetObject/PutObject + Lag)"]
+        DDBSync["floci-test-ddb-sync\n(Streams -> PutItem/DeleteItem + LWW)"]
+    end
+
+    subgraph RegionB["Region B (us-west-2)"]
+        FlociB[("floci-region-b (:4567)\nS3 | SQS | DynamoDB | Streams | KMS")]
+        NodeB["stravin-node-b\n(Secondary Region)"]
+    end
+
+    NodeA <--> FlociA
+    NodeB <--> FlociB
+    FlociA -- "S3->SQS Event" --> S3Sync -- "Delayed PutObject" --> FlociB
+    FlociA -- "DynamoDB Stream" --> DDBSync -- "Async PutItem/DeleteItem" --> FlociB
+    NodeB -. "404 Fallback GetObject" .-> FlociA
+```
+
+### Dedicated Floci Test Tools in `stravin-dev/core`
+
+Both tools live in `stravin-dev/core` under explicit Floci test prefixes so they are unmistakably test infrastructure and never leak into production binaries:
+
+| Tool | Location (`stravin-dev/core`) | Mechanism | Loop Guard & Semantics |
+| :--- | :--- | :--- | :--- |
+| **`floci-test-s3-sync`** | `cmd/floci-test-s3-sync`, `internal/flocitest/s3sync` | Consumes Floci's native S3-to-SQS event notifications (`PutBucketNotificationConfiguration` for `s3:ObjectCreated:*` and optional `s3:ObjectRemoved:*`), waits `FLOCI_SYNC_LAG_DELAY`, then copies via `GetObject` -> `PutObject`. | Stamps `x-amz-meta-floci-replicated-from=<source_region>` on copied objects and skips events carrying the target region's marker; ignores `s3:TestEvent`. |
+| **`floci-test-ddb-sync`** | `cmd/floci-test-ddb-sync`, `internal/flocitest/ddbsync` | Polls DynamoDB Streams (`DescribeTable`, `DescribeStream`, `GetShardIterator`, `GetRecords`), waits `FLOCI_SYNC_LAG_DELAY`, then applies `INSERT`/`MODIFY` via `PutItem` and `REMOVE` via `DeleteItem`. | Stamps `_floci_rep_origin` and `_floci_rep_ts` (unix nanos); skips records originating from the target region; guards `PutItem` with `attribute_not_exists(#ts) OR #ts < :ts` for MREC last-writer-wins (LWW); suppresses recent `REMOVE` bounces in memory. |
+
+Because Go links only imported packages per binary and both tools have a dedicated build target, adding `floci-test-s3-sync` (including `service/sqs`) and `floci-test-ddb-sync` adds **zero bytes** and **zero dependencies** to the five production Stravin daemons (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, `stravin-hook`). Production daemons continue talking exclusively to standard AWS SDK v2 endpoints with no local-only conditionals.
+
+### Multi-Region Bootstrap Additions
+
+In multi-region Compose profiles, both `floci-region-a` (`us-east-1`) and `floci-region-b` (`us-west-2`) enable `FLOCI_SERVICES="s3,sqs,dynamodb,dynamodbstreams,kms"`. Bootstrap adds two steps per region:
+
+1. Create a local SQS queue (for example, `floci-test-s3-sync-queue`) in each Floci instance.
+2. Attach `PutBucketNotificationConfiguration` on `git-objects-{region}` forwarding `s3:ObjectCreated:*` (and optionally `s3:ObjectRemoved:*`) to that queue.
+
+### Reproducible Failure & Lag Scenarios
+
+| Scenario | Test Setup | Expected Stravin Core Behavior |
+| :--- | :--- | :--- |
+| **Metadata-before-blob (`404` fallback)** | Set `FLOCI_SYNC_LAG_DELAY=10s` on `floci-test-s3-sync` and `100ms` on `floci-test-ddb-sync`; push to `us-east-1`, immediately fetch from `us-west-2`. | `stravin-node-b` sees the new ref in `floci-region-b` DynamoDB, receives `404 NoSuchKey` from local S3, falls back to `floci-region-a` S3 using `origin_region`, caches on NVMe, and serves `git-upload-pack` cleanly. |
+| **Disaster failover & integrity scrub** | Pause `floci-test-s3-sync`, push to `us-east-1`, then stop `floci-region-a` before S3 copy completes. Promote `us-west-2` via `stravin-ctrl`. | `stravin-ctrl` bumps `failover_epoch`, detects missing packs via `HeadObject` against `floci-region-b` S3, and rewinds affected refs via `Ref History` so the promoted repo has zero dangling refs. |
+| **Cross-region WAN partition** | Pause both `floci-test-s3-sync` and `floci-test-ddb-sync`. Attempt pushes to `us-west-2` and fetches from both regions. | Both regions continue serving `git fetch` (AP reads); secondary region fails closed on writes (CP writes) without silent LWW commit loss. |
 
 ## Upstream Floci Feature-Gap & PR Policy
 
