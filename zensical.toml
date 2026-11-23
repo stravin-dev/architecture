@@ -17,6 +17,7 @@ nav = [
   { "Operations & Tooling" = [
     { "Local Development" = "operations/local-dev.md" },
     { "Telemetry & Observability" = "operations/telemetry.md" },
+    { "Load Testing & Chaos" = "operations/load-testing.md" },
     { "Service Scaling" = "operations/scaling.md" },
     { "Zero-Downtime Deployment" = "operations/deployment.md" },
   ] },
