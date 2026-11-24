@@ -14,6 +14,17 @@ nav = [
     { "Server-Side Wasm Hooks" = "core/hooks.md" },
     { "Isolation & Multi-Tenancy" = "core/isolation-multitenancy.md" },
   ] },
+  { "Product Interfaces" = [
+    { "Overview & Matrix" = "interfaces/index.md" },
+    { "Core <-> Review" = "interfaces/core-review.md" },
+    { "Core <-> Run" = "interfaces/core-run.md" },
+    { "Core <-> Index" = "interfaces/core-index.md" },
+    { "Core <-> Gate" = "interfaces/core-gate.md" },
+    { "Review <-> Run" = "interfaces/review-run.md" },
+    { "Review <-> Gate" = "interfaces/review-gate.md" },
+    { "Run <-> Gate" = "interfaces/run-gate.md" },
+    { "Review <-> Index" = "interfaces/review-index.md" },
+  ] },
   { "Operations & Tooling" = [
     { "Local Development" = "operations/local-dev.md" },
     { "Telemetry & Observability" = "operations/telemetry.md" },

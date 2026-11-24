@@ -63,6 +63,20 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 - [Server-Side Hooks](core/hooks.md) — Three-tier hook architecture combining synchronous `wazero` WebAssembly gates overlapped with S3 uploads, DynamoDB Streams transactional outbox for async hooks, `HookHostABI`, and resource guardrails.
 - [Sandboxed Execution & Multi-Tenancy](core/isolation-multitenancy.md) — Linux namespace/cgroup v2 sandboxing vs. tenant-pinned microVMs, Git config lockdown, multi-tenant performance impact, avoiding orders-of-magnitude traps, and Day-1 architectural seams.
 
+## Product-Stack Interfaces
+
+Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, and **Stravin Gate**:
+
+- [Product-Stack Interface Overview & Matrix](interfaces/index.md) — System-wide topology, intersection matrix, shared canonical identifiers, auth/tenancy rules, standard async event envelope, and versioning conventions.
+- [Core <-> Review](interfaces/core-review.md) — Git Smart HTTP/SSH, proposed read-only Git Data/Diff gRPC API, PR ref namespaces, `stravin-hook` push events, and Tier 1 Wasm hook rejections.
+- [Core <-> Run](interfaces/core-run.md) — Ephemeral runner clone/fetch leveraging Valkey+S3 pack cache and `bundle-uri`, scoped Git tokens, and push/tag trigger webhooks.
+- [Core <-> Index](interfaces/core-index.md) — Incremental indexing from `stravin-hook` ref events, tree/blob read path, `default_branch` and `object_format` metadata, backfill, and repository tombstones.
+- [Core <-> Gate](interfaces/core-gate.md) — Protected-ref enforcement via synchronous `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, speculative refs (`refs/stravin/gate/*`), and `failover_epoch` fencing.
+- [Review <-> Run](interfaces/review-run.md) — Check suite/run lifecycle, inline annotations, live log streaming URLs, manual re-run/cancel triggers, and stacked-diff check inheritance.
+- [Review <-> Gate](interfaces/review-gate.md) — PR approval and policy eligibility snapshots, enqueue/dequeue/priority API, queue feedback to PR timelines, and atomic stacked-diff merge groups.
+- [Run <-> Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, verdicts bound to `(tree_oid, commit_oid, policy_version)`, and fast cancellation on queue eviction or reset.
+- [Review <-> Index](interfaces/review-index.md) — PR diff code intelligence (hover, go-to-definition, find-references, cross-repo callers) with RBAC filtering and graceful lag fallback.
+
 ## Operations & Tooling
 
 - [Local Development](operations/local-dev.md) — Docker Compose local development stack using Floci (S3, DynamoDB, Streams, KMS), Valkey, bootstrap seeding, `make load-test` / `make chaos-e2e`, and the upstream Floci PR policy.
