@@ -2,6 +2,21 @@
 
 Stravin Core delivers multi-region high availability with **zero home-region latency penalty** by pinning writes to a repository's `home_region` and replicating asynchronously via DynamoDB Global Tables (MREC) and S3 CRR + RTC. This document details how the system handles cross-service replication asymmetry, disaster failover, split-brain fencing, and CAP/PACELC trade-offs.
 
+!!! info "Implementation Status: Local Dual-Floci Verified; Production Cloud Failover TBD"
+    The `stravin-ctrl` lease manager, fencing epoch transitions, `HeadObject` integrity scrubber, ref-rewind logic, and recovery reconciliation are **implemented and verified locally** against dual Floci instances (`make multi-region-e2e`). Production **third-region/global witness quorum**, **automated cloud failover triggers**, and **real multi-region AWS operations** remain **TBD / Planned**.
+
+## Implemented `stravin-ctrl` HTTP Admin API
+
+`stravin-ctrl` exposes an authenticated HTTP admin API (bound locally to `127.0.0.1:8083`, protected by `STRAVIN_CTRL_ADMIN_TOKEN`) for driving regional leases, epoch fencing, failover scrubs, and old-primary reconciliation:
+
+| Method & Path | Purpose |
+| :--- | :--- |
+| `GET /v1/lease`, `GET /v1/lease/status` | Inspect the current regional write lease (`PK: REGION#{region}#LEASE, SK: WRITE`), owner, mode, and expiry. |
+| `POST /v1/lease/fence` | Transition the regional write lease mode (e.g., `DRAINING` / `READ_ONLY`) to fence stale writers. |
+| `POST /v1/epoch/advance` | Atomically increment a repository's `failover_epoch` and update `home_region` in DynamoDB `META`. |
+| `POST /v1/scrub` | Verify recent Pack Manifest entries via parallel S3 `HeadObject` checks and rewind refs with missing packs using `Ref History`. |
+| `POST /v1/recovery/reconcile` | Reconcile a recovered former primary against the active `failover_epoch` and surface orphaned S3 packs as recovery branches. |
+
 ## The Metadata-Before-Blob Race Condition
 
 Pairing DynamoDB Global Tables (MREC) with S3 Cross-Region Replication creates an inherent timing asymmetry:
@@ -95,7 +110,7 @@ In `home_region`, `stravin-pack` runs two-phase compaction (Publish compacted pa
 During an asymmetric WAN partition, Region B's health probes cannot reach Region A even though Region A is still healthy and accepting pushes from clients. If `stravin-ctrl` in Region B promotes Region B based solely on local probe failure, both regions become active writers simultaneously.
 
 - **Data Loss:** **Known / Severe if unmitigated.** Concurrent writes to the same ref in both regions collide under DynamoDB MREC Last-Writer-Wins when the partition heals, silently overwriting commits from one region.
-- **Recovery:** Never allow automatic promotion from a single region's perspective—require either **explicit operator approval** or an **independent third-region/global witness quorum** to issue a new `failover_epoch`. If a false failover occurs, immediately put both regions in `DRAINING` / `READ-ONLY` mode, audit `Ref History` across both regions, and recover overwritten commits from preserved S3 packfiles into `refs/stravin-recovery/<ref>-<oid>` branches.
+- **Recovery:** Never allow automatic promotion from a single region's perspective—require either **explicit operator approval** (supported today via `stravin-ctrl`'s admin API) or an **independent third-region/global witness quorum** (**TBD / Planned** for production) to issue a new `failover_epoch`. If a false failover occurs, immediately put both regions in `DRAINING` / `READ-ONLY` mode, audit `Ref History` across both regions, and recover overwritten commits from preserved S3 packfiles into `refs/stravin-recovery/<ref>-<oid>` branches.
 
 ### 6. S3 Origin-Fallback Thundering Herd During CRR Lag Spikes
 

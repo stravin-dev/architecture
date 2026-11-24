@@ -1,6 +1,8 @@
 # Local Development with Docker Compose & Floci
 
-Stravin Core is designed to run completely locally without live AWS accounts, shared staging environments, or cloud credentials. Developers spin up the full Go daemon suite (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, and `stravin-hook`) via **Docker Compose**, backed by **Floci** for local AWS service emulation and an optional OpenTelemetry / Grafana LGTM profile for end-to-end observability.
+Stravin Core is designed to run completely locally without live AWS accounts, shared staging environments, or cloud credentials. Developers spin up the full Go daemon suite (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, and `stravin-hook`) via **Docker Compose**, backed by **Floci** for local AWS service emulation, **Valkey** for the hot external full-clone pack response cache, and an optional OpenTelemetry / Grafana LGTM + `valkey-exporter` profile for end-to-end observability.
+
+Tool versions in `stravin-dev/core` are pinned via `asdf` (`.tool-versions`), including **Go `1.26`** (`golang 1.26.11`), `golangci-lint`, `pre-commit`, and `make`.
 
 ## Purpose & Scope
 
@@ -18,22 +20,27 @@ flowchart TB
 
     subgraph Compose["Docker Compose Network (stravin-net)"]
         Edge["stravin-edge (SSH :2222 / HTTP :8080)"]
+        Valkey[("Valkey (:6379)\n128mb allkeys-lfu Pack Cache")]
         Node["stravin-node (Warm NVMe Volume + wazero)"]
         Pack["stravin-pack (Compaction Worker)"]
-        Ctrl["stravin-ctrl (Failover & Scrub)"]
+        Ctrl["stravin-ctrl (Failover & Scrub :8083)"]
         Hook["stravin-hook (Async Stream Consumer)"]
 
-        Bootstrap["floci-init (One-shot Bucket/Table/KMS Seed)"]
-        Floci[("Floci AWS Emulator (:4566)\nS3 | DynamoDB | Streams | KMS")]
+        Bootstrap["floci-init (One-shot Bucket/Table/KMS + demo,repo-1..repo-3 Seed)"]
+        Floci[("Floci AWS Emulator (:4566)\nS3 (persistent) | DynamoDB | Streams | KMS")]
 
         subgraph Telemetry["Optional Profile: --profile telemetry"]
-            Otel["OTel Collector (:4317 OTLP/gRPC)"]
+            Otel["OTel Collector (:4317 / :4318)"]
+            VExp["valkey-exporter (:9121)"]
             LGTM["Prometheus + Loki + Tempo"]
-            Grafana["Grafana UI (:3000)"]
+            Grafana["Grafana UI (:3000)\n3 Dashboards"]
             Otel --> LGTM
+            VExp --> LGTM
             LGTM --> Grafana
         end
 
+        Edge <--> Valkey
+        Valkey -.-> VExp
         Edge --> Node
         Node -->|"PutObject / GetObject"| Floci
         Node -->|"TransactWriteItems / Query"| Floci
@@ -71,26 +78,32 @@ A one-shot `floci-init` container runs after Floci passes its health check and b
 1. Create regional S3 bucket(s) (`git-objects-us-east-1`, plus `git-objects-us-west-2` in multi-region mode).
 2. Create the DynamoDB table with `PK`/`SK` key schema, `StreamViewType=NEW_IMAGE`, and TTL enabled on `ttl`.
 3. Create the local KMS symmetric key and `alias/stravin-local-dev` alias.
-4. Seed a default local tenant and test repository `META` item (optional, for instant `git push` smoke tests).
+4. Seed the default local tenant (`local`) and initial repositories (`STRAVIN_DEFAULT_REPOS=demo,repo-1,repo-2,repo-3`) in DynamoDB `META` so both smoke tests and `make load-test` (`--repos 3`) work immediately.
 
 ## Reference Docker Compose Architecture
 
-The snippet below illustrates the canonical service wiring, Floci endpoint overrides, and optional `telemetry` profile. Actual runnable compose files live in `stravin-dev/core` rather than this documentation repository.
+`stravin-dev/core` ships three Compose stacks:
+
+- `docker-compose.yml` — Single-region local stack with Floci (S3 persistent storage mode backed by `floci-data`), Valkey (`valkey/valkey:8-alpine`, `128mb`, `allkeys-lfu`), all five Go daemons, and `--profile telemetry` (OTel Collector, `valkey-exporter`, Prometheus, Loki, Tempo, Grafana).
+- `docker-compose.multi-region.yml` — Dual-Floci (`us-east-1` + `us-west-2`), dual-Valkey (`valkey-east`, `valkey-west`), and `floci-test-s3-sync` / `floci-test-ddb-sync` (`make multi-region-up`, `make multi-region-e2e`).
+- `docker-compose.chaos.yml` — Single-region stack with Toxiproxy fault proxies interposed on ingress, gRPC, and Floci links (`make chaos-up`, `make load-test`, `make chaos-e2e`).
+
+The snippet below mirrors the current single-region `docker-compose.yml` wiring in `stravin-dev/core`:
 
 ```yaml
 services:
   floci:
-    image: ghcr.io/floci-io/floci:v0.x.y # Pin exact tag or digest
+    image: floci/floci:2.5.0
     ports:
       - "4566:4566"
     environment:
       FLOCI_SERVICES: "s3,dynamodb,dynamodbstreams,kms"
       FLOCI_DEFAULT_REGION: "us-east-1"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_floci/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
+      FLOCI_STORAGE_MODE: "memory"
+      FLOCI_STORAGE_SERVICES_S3_MODE: "persistent"
+      FLOCI_STORAGE_PERSISTENT_PATH: "/app/data"
+    volumes:
+      - floci-data:/app/data
 
   floci-init:
     image: amazon/aws-cli:latest
@@ -102,128 +115,90 @@ services:
       AWS_ACCESS_KEY_ID: "test"
       AWS_SECRET_ACCESS_KEY: "test"
       AWS_DEFAULT_REGION: "us-east-1"
+      STRAVIN_S3_BUCKET: "git-objects-us-east-1"
+      STRAVIN_DDB_TABLE: "stravin-core"
+      STRAVIN_KMS_ALIAS: "alias/stravin-local-dev"
+      STRAVIN_DEFAULT_TENANT: "local"
+      STRAVIN_DEFAULT_REPOS: "${STRAVIN_DEFAULT_REPOS:-demo,repo-1,repo-2,repo-3}"
     entrypoint: ["/bin/sh", "/scripts/bootstrap-floci.sh"]
     volumes:
       - ./scripts/bootstrap-floci.sh:/scripts/bootstrap-floci.sh:ro
 
+  valkey:
+    image: valkey/valkey:8-alpine
+    command:
+      - "valkey-server"
+      - "--maxmemory"
+      - "128mb"
+      - "--maxmemory-policy"
+      - "allkeys-lfu"
+      - "--save"
+      - ""
+
   stravin-edge:
-    build: { context: ., dockerfile: Dockerfile.edge }
+    build: { context: ., dockerfile: Dockerfile, target: edge }
     depends_on:
-      floci-init:
-        condition: service_completed_successfully
+      floci-init: { condition: service_completed_successfully }
+      valkey: { condition: service_healthy }
+      stravin-node: { condition: service_healthy }
+      stravin-ctrl: { condition: service_healthy }
     ports:
       - "2222:2222" # Git SSH
       - "8080:8080" # Git Smart HTTP
     environment:
       STRAVIN_REGION: "us-east-1"
+      STRAVIN_DDB_TABLE: "stravin-core"
+      STRAVIN_S3_BUCKET: "git-objects-us-east-1"
+      STRAVIN_S3_FORCE_PATH_STYLE: "true"
       STRAVIN_NODE_PEERS: "stravin-node:9090"
+      STRAVIN_PACK_CACHE_VALKEY_ADDR: "valkey:6379"
+      STRAVIN_PACK_CACHE_TTL: "5m"
+      STRAVIN_PACK_CACHE_VALKEY_MAX_ENTRY_BYTES: "8388608"
+      STRAVIN_PACK_CACHE_S3_MAX_ENTRY_BYTES: "67108864"
       AWS_ENDPOINT_URL: "http://floci:4566"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 
   stravin-node:
-    build: { context: ., dockerfile: Dockerfile.node }
+    build: { context: ., dockerfile: Dockerfile, target: node }
     depends_on:
-      floci-init:
-        condition: service_completed_successfully
+      floci-init: { condition: service_completed_successfully }
+      stravin-ctrl: { condition: service_healthy }
+    ports:
+      - "8081:8081" # Health & metrics
     environment:
       STRAVIN_REGION: "us-east-1"
       STRAVIN_S3_BUCKET: "git-objects-us-east-1"
       STRAVIN_S3_FORCE_PATH_STYLE: "true"
       STRAVIN_DDB_TABLE: "stravin-core"
       STRAVIN_KMS_KEY_ID: "alias/stravin-local-dev"
+      STRAVIN_NODE_MAX_UPLOAD_PACKS: "10"
+      STRAVIN_NODE_UPLOAD_PACK_QUEUE_TIMEOUT: "15s"
+      STRAVIN_GIT_PACK_THREADS: "1"
+      STRAVIN_GIT_PACK_WINDOW_MEMORY: "256m"
+      STRAVIN_GIT_PACK_COMPRESSION: "1"
+      STRAVIN_GIT_PACK_ALLOW_REUSE: "multi"
       AWS_ENDPOINT_URL: "http://floci:4566"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
     volumes:
       - node-nvme-cache:/var/lib/stravin/cache
 
-  stravin-pack:
-    build: { context: ., dockerfile: Dockerfile.pack }
+  valkey-exporter:
+    image: oliver006/redis_exporter:v1.67.0-alpine
+    profiles: ["telemetry"]
     depends_on:
-      floci-init:
-        condition: service_completed_successfully
+      valkey: { condition: service_healthy }
     environment:
-      STRAVIN_REGION: "us-east-1"
-      STRAVIN_S3_BUCKET: "git-objects-us-east-1"
-      STRAVIN_S3_FORCE_PATH_STYLE: "true"
-      STRAVIN_DDB_TABLE: "stravin-core"
-      AWS_ENDPOINT_URL: "http://floci:4566"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      REDIS_ADDR: "redis://valkey:6379"
+```
 
-  stravin-ctrl:
-    build: { context: ., dockerfile: Dockerfile.ctrl }
-    depends_on:
-      floci-init:
-        condition: service_completed_successfully
-    environment:
-      STRAVIN_REGION: "us-east-1"
-      STRAVIN_DDB_TABLE: "stravin-core"
-      AWS_ENDPOINT_URL: "http://floci:4566"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+### Common Local Make Targets
 
-  stravin-hook:
-    build: { context: ., dockerfile: Dockerfile.hook }
-    depends_on:
-      floci-init:
-        condition: service_completed_successfully
-    environment:
-      STRAVIN_REGION: "us-east-1"
-      STRAVIN_DDB_TABLE: "stravin-core"
-      AWS_ENDPOINT_URL: "http://floci:4566"
-      AWS_REGION: "us-east-1"
-      AWS_ACCESS_KEY_ID: "test"
-      AWS_SECRET_ACCESS_KEY: "test"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
-
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    profiles: ["telemetry"]
-    ports:
-      - "4317:4317" # OTLP gRPC
-    volumes:
-      - ./deploy/local/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
-
-  prometheus:
-    image: prom/prometheus:latest
-    profiles: ["telemetry"]
-    ports:
-      - "9090:9090"
-
-  loki:
-    image: grafana/loki:latest
-    profiles: ["telemetry"]
-    ports:
-      - "3100:3100"
-
-  tempo:
-    image: grafana/tempo:latest
-    profiles: ["telemetry"]
-    ports:
-      - "3200:3200"
-
-  grafana:
-    image: grafana/grafana:latest
-    profiles: ["telemetry"]
-    ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
-      - loki
-      - tempo
-
-volumes:
-  node-nvme-cache:
+```bash
+make test              # Run unit tests with -race (Go 1.26 via ./scripts/go.sh)
+make e2e               # Single-region end-to-end verification
+make load-test         # Run stravin-loadgen against local stack (default DEVS=4 AGENTS=6 REPOS=3)
+make chaos-e2e         # Full Toxiproxy + stravin-chaos + stravin-loadgen E2E verification
+make multi-region-e2e  # Dual-Floci replication, origin fallback, and failover E2E verification
 ```
 
 ## Multi-Region Local Testing with Dual Floci

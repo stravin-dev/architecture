@@ -1,5 +1,8 @@
 # Zero-Downtime Deployment
 
+!!! warning "Status: TBD / Planned (Not Yet Built)"
+    Only the **local Docker Compose + Floci development experience** exists today in `stravin-dev/core` (`v1.12.x`). Production **Kubernetes deployment manifests, rollout controllers, and multi-region promotion automation are TBD** (tracked in `stravin-dev/core#71` and future product phases).
+
 This document defines the deployment strategy for rolling out changes across Stravin Core's five Go daemons (`stravin-ctrl`, `stravin-hook`, `stravin-pack`, `stravin-node`, and `stravin-edge`) with zero user-facing downtime.
 
 The approach assumes a **Kubernetes-style orchestration model** (readiness probes, PodDisruptionBudgets, surge/unavailable budgets, graceful `SIGTERM` draining, and percentage-based traffic shifting) while remaining **tool-agnostic**—the exact deployment engine varies by environment, but the ordering, pacing, and compatibility invariants stay the same.

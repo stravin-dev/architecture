@@ -2,9 +2,27 @@
 
 Single-repository commit throughput depends on two primary variables: whether pushes target **one shared branch** (such as `main`) or **many independent branches** (agent-scale workloads), and how many commits `K` are batched per push (`commits/sec = K × pushes/sec`).
 
-With a sharded S3 prefix and shard-distributed Go writers, Stravin Core reaches **~6,666 multi-branch pushes/sec** on default DynamoDB quotas and **16,000–32,000 pushes/sec** theoretically with raised quotas—sustaining **5,000–10,000 pushes/sec** (tens of thousands of commits/sec) in practice on a single repository before compaction and cross-region replication bandwidth become the dominant engineering limits. This places Stravin Core in the same tier as GitHub's Project Rubicon internal benchmarks (7,200 pushes/sec across 5,000 concurrent agents) and well beyond single-manifest S3 designs (~120–300 pushes/sec).
+## Verified Local Implementation & Optimizations (`v1.12.x`)
 
-## Workload Regimes & Throughput Ceilings
+Before projecting cloud-scale ceilings, the following performance optimizations are **implemented and verified locally** in `stravin-dev/core` (`v1.12.x`) against Docker Compose + Floci + Valkey:
+
+- **Tiered Full-Clone Pack Response Cache (`stravin-edge`):** Caches Smart HTTP full-clone `upload-pack` responses after auth/authz in **Valkey** (`<= 8 MiB`, `5m` TTL, `allkeys-lfu`) with **Floci/S3 spillover** (`<= 64 MiB`) and in-process `singleflight` coalescing (`internal/edge/pack_cache.go`).
+- **Pure-Go Protocol v2 `ls-refs` Fast Path (`stravin-node`):** Serves bounded stateless-RPC `ls-refs` (`<= 1 MiB`) directly from cached DynamoDB ref state (`internal/node/ls_refs.go`), avoiding `git-upload-pack` subprocess forks on ref discovery.
+- **Versioned `META` Ref & Manifest Cache (`stravin-node`):** Uses `RefVersion` and `ManifestVersion` counters on `META` to skip redundant DynamoDB shard queries when a repository has not changed.
+- **`upload-pack` Concurrency Semaphore & Queue (`stravin-node`):** Bounds concurrent `git-upload-pack` subprocesses via `STRAVIN_NODE_MAX_UPLOAD_PACKS` (local default `10`) and `STRAVIN_NODE_UPLOAD_PACK_QUEUE_TIMEOUT` (default `15s`) to prevent CPU/memory thrashing under clone bursts.
+- **`git` Pack-Objects Tuning (`internal/gitexec/sandbox.go`):** Applies allowlisted `pack.*` flags on `upload-pack` (`pack.threads=1`, `pack.windowMemory=256m`, `pack.compression=1`, `pack.allowPackReuse=multi`) via `STRAVIN_GIT_PACK_*` env vars to minimize per-process memory and CPU contention.
+- **Tier-0 Multi-Batch Compaction (`stravin-pack`):** Drains small packs in multi-batch cycles with `MaxTier0PackBytes = 16 MiB` (`STRAVIN_PACK_MAX_TIER0_PACK_BYTES`) and `MaxBatchSize = 100` (`internal/compaction/engine.go`), keeping active pack counts low during sustained push bursts.
+
+**Verified Local Benchmark:** On a local 10-core macOS Docker host running 10 concurrent AI agent workers (`0` devs) over a sustained **5-minute** `stravin-loadgen` run, Stravin Core sustained **~108 req/s average** at `stravin-edge` with **0 errors** in both `stravin-loadgen` (unexpected + `git fsck`) and `stravin-core` (up from a ~20 req/s initial local baseline).
+
+## Planned / Theoretical Production AWS Ceilings
+
+!!! note "Theoretical Targets — Not Yet Benchmarked in Production AWS"
+    The 5,000–32,000 pushes/sec figures, AWS DynamoDB/S3 quota math, and DynamoDB Streams manifest aggregator below are **planned architectural targets** derived from AWS service limits. They have **not yet been benchmarked on live AWS infrastructure**.
+
+With a sharded S3 prefix and shard-distributed Go writers, Stravin Core's target architecture is designed to reach **~6,666 multi-branch pushes/sec** on default DynamoDB quotas and **16,000–32,000 pushes/sec** theoretically with raised quotas—targeting **5,000–10,000 pushes/sec** (tens of thousands of commits/sec) in production AWS on a single repository before compaction and cross-region replication bandwidth become the dominant engineering limits. This targets the same tier as GitHub's Project Rubicon internal benchmarks (7,200 pushes/sec across 5,000 concurrent agents) and well beyond single-manifest S3 designs (~120–300 pushes/sec).
+
+## Workload Regimes & Theoretical Ceilings
 
 | Workload Regime | Theoretical Push Ceiling (1 commit/push) | Effective Commits/sec (`K`-commit batching) | Binding Bottleneck |
 | :--- | :--- | :--- | :--- |
@@ -90,7 +108,7 @@ At 5,000 pushes/sec, a single repository generates **300,000 new packfiles per m
 
 ### 2. Shard Read-Fan-Out Tax
 
-Sharding DynamoDB across `S = 64` ref shards and `M = 32` manifest shards unlocks 16,000+ writes/sec, but a cold reader polling all shards must scatter-gather across up to **96 DynamoDB partitions** and wait for p99 tail latency. To keep `git fetch` and `git clone` fast, `stravin-node` instances consume a **DynamoDB Streams fan-out** (or a lightweight Go in-memory manifest aggregator) to stay incrementally synced instead of polling all `S + M` shards on every read.
+Sharding DynamoDB across `S = 64` ref shards and `M = 32` manifest shards unlocks 16,000+ writes/sec, but a cold reader polling all shards must scatter-gather across up to **96 DynamoDB partitions** and wait for p99 tail latency. Today, `stravin-node` avoids unnecessary shard scans via its **versioned `META` cache** (`RefVersion` / `ManifestVersion`). For future production scale where `META` updates themselves become a hot-key bottleneck, consuming a **DynamoDB Streams fan-out** (or a lightweight Go in-memory manifest aggregator) is **TBD / Planned**.
 
 ### 3. Pack-Size Bandwidth Ceiling
 

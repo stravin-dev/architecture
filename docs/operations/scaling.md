@@ -1,5 +1,8 @@
 # Service Scaling
 
+!!! warning "Status: TBD / Planned (Not Yet Built)"
+    Only the **local Docker Compose + Floci development experience** exists today in `stravin-dev/core` (`v1.12.x`). Service interfaces, graceful shutdown hooks, and bounded-cardinality OpenTelemetry/Prometheus metrics are defined and implemented, while **production Kubernetes autoscaling manifests, HPA/KEDA policies, and scaling controllers are TBD** and will be built with the final production platform.
+
 This document defines how Stravin Core's five Go daemons (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-hook`, and `stravin-ctrl`) scale up/out under increasing load, scale down/in when load subsides, and how operators and autoscalers use OpenTelemetry metrics to decide when to act.
 
 Storage-plane ceilings (DynamoDB WCUs/shards and S3 prefix partitioning) are covered separately in [Performance & Throughput Scaling](../core/performance.md); this guide focuses strictly on scaling our Go services.
