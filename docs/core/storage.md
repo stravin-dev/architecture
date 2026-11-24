@@ -17,6 +17,9 @@ s3://git-objects-{region}/
     aux/
       {manifest_epoch}.midx       # Multi-pack-index for fast object lookup
       {manifest_epoch}.graph      # Commit-graph for fast merge-base & reachability walks
+  bundles/{tenant_id}/{repo_id}/
+    latest.bundle                 # Pre-generated Git bundle for fast clone bootstrap (bundle-uri)
+  pack-cache/v1/{shard}/{key}.bin # Spillover full-clone pack response cache (> 8 MiB, <= 64 MiB)
   hooks/
     {wasm_sha256}.wasm            # Content-addressed server-side Wasm hook binaries
 ```
@@ -28,6 +31,9 @@ s3://git-objects-{region}/
 Mirroring GitHub's Project Rubicon, `stravin-node` always streams the validated `.pack` and `.idx` objects to local S3 and awaits HTTP `200 OK`—leveraging S3's strong read-after-write consistency within the region—**before** committing any reference update to DynamoDB. A reference in the home region therefore never points to an unpersisted object.
 
 ### Asynchronous Cross-Region Replication
+
+!!! note "Local Emulation vs. Production AWS"
+    In `stravin-dev/core` (`v1.12.x`), both **S3 CRR + RTC** and **DynamoDB Global Tables (MREC)** are emulated locally using dual Floci instances bridged by `floci-test-s3-sync` and `floci-test-ddb-sync` (see [Local Development](../operations/local-dev.md)). Real AWS production bucket/table provisioning and replication rules are **TBD / Planned**.
 
 Regional buckets enable **S3 Cross-Region Replication (CRR)** with **S3 Replication Time Control (RTC)**:
 
@@ -58,16 +64,21 @@ Each physical DynamoDB partition enforces a hard limit of **1,000 WCU/sec**. Pla
 
 | Entity | Partition Key (`PK`) | Sort Key (`SK`) | Key Attributes |
 | :--- | :--- | :--- | :--- |
-| **Repo Routing & Fencing** | `T#{tenant_id}#REPO#{repo_id}` | `META` | `home_region`, `failover_epoch`, `ref_shards` (`1..64`), `manifest_shards` (`1..32`), `write_state` |
+| **Repo Routing & Fencing** | `T#{tenant_id}#REPO#{repo_id}` | `META` | `home_region`, `failover_epoch`, `ref_shards` (`1..64`), `manifest_shards` (`1..32`), `write_state`, `default_branch`, `object_format` (`sha1`/`sha256`), `ref_version`, `manifest_version` |
 | **Reference State (Ref-CAS)** | `T#{tenant_id}#REPO#{repo_id}#RS#{hash(ref) % S}` | `REF#{ref_name}` | `oid`, `prev_oid`, `pack_id`, `updated_at`, `epoch`, `origin_region` |
 | **Ref History (Rollback Log)** | `T#{tenant_id}#REPO#{repo_id}#RH#{hash(ref) % S}` | `REF#{ref_name}#{ulid}` | `oid`, `pack_id`, `ttl` (7d) — used for failover rollback and DynamoDB Streams outbox |
 | **Pack Manifest** | `T#{tenant_id}#REPO#{repo_id}#MS#{hash(pack) % M}` | `PACK#{ulid}#{pack_id}` | `size_bytes`, `origin_region`, `status` (`ACTIVE` / `COMPACTED`), `created_at` |
 | **Compaction Leases** | `T#{tenant_id}#REPO#{repo_id}#LEASE` | `SHARD#{m}` | `owner_id`, `lease_expires_at` |
-| **Hook Configuration** | `T#{tenant_id}#REPO#{repo_id}` | `HOOKS` | Ordered list of `{hook_id, wasm_sha256, ref_glob, timeout_ms, memory_limit_mb, fail_mode}` (optional org inheritance at `T#{tenant_id}#ORG#{org_id}`) |
+| **Regional Write Lease** | `REGION#{region}#LEASE` | `WRITE` | `owner_id`, `mode` (`ACTIVE` / `DRAINING` / `READ_ONLY`), `lease_expires_at`, `updated_at` |
+| **Hook Configuration (Tier 1)** | `T#{tenant_id}#REPO#{repo_id}` | `HOOKS` | Ordered list of `{hook_id, wasm_sha256, ref_glob, timeout_ms, memory_limit_mb, fail_mode}` (optional org inheritance at `T#{tenant_id}#ORG#{org_id}`) |
+| **Webhook Configuration (Tier 2)** | `T#{tenant_id}#REPO#{repo_id}` | `WEBHOOKS` | List of outbound webhook endpoints, KMS-encrypted signing secrets, ref globs, and retry policies |
+| **Streams Checkpoint** | `STREAMS#CHECKPOINT` | `SHARD#{shard_id}` | `sequence_number`, `updated_at` — durable `stravin-hook` DynamoDB Streams cursor |
 
-### Avoiding a Hot Key on `META`
+### `META` Version Counters & Hot-Key Trade-Off
 
-`stravin-node` never includes the `META` item in per-push `TransactWriteItems` calls; doing so would reintroduce a single-partition 500 tx/sec ceiling per repository. Instead, nodes validate `failover_epoch` via a lightweight background regional write lease check (see [Multi-Region HA & Consistency](ha-consistency.md)).
+In the current `v1.12.x` implementation, `TransactWriteItems` atomically increments `ref_version` (and `manifest_version` when a new pack is published) on the repository's `META` item (`ADD ref_version :one, manifest_version :one`). This lets `stravin-node` validate its local cached refs and pack manifests with a single `GetItem` on `META` instead of scanning all `S + M` shards on every read. Meanwhile, `failover_epoch` fencing is validated against the regional write lease (`PK: REGION#{region}#LEASE, SK: WRITE`) via a lightweight background refresh.
+
+For future ultra-high-throughput monorepos exceeding a single DynamoDB partition's 500 tx/sec transactional ceiling, decoupling version invalidation from `META` (e.g., via a DynamoDB Streams fan-out aggregator) is a **planned** scaling evolution (see [Performance & Throughput Scaling](performance.md)).
 
 ## Related Documents
 

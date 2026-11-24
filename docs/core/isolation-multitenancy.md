@@ -2,6 +2,11 @@
 
 `git` is a large C codebase parsing untrusted binary packfiles, while `stravin-node` holds AWS IAM credentials, DynamoDB access, and every tenant's cached repositories. Running `git` in the same privilege context as `stravin-node` means a single memory-corruption CVE or crafted packfile delta bomb compromises the entire host.
 
+!!! info "Implementation Status (`internal/gitexec/`)"
+    **Implemented today (`v1.12.x`):** `internal/gitexec/` implements the pluggable `GitExecutor` (`SubprocessExecutor`), Git config attack-surface lockdown (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `core.hooksPath=/dev/null`, `core.fsmonitor=false`), Linux namespace + `cgroup v2` sandboxing (`DefaultMemoryMaxBytes = 512 MiB`, `DefaultCPUQuota = "200000 100000"`, `DefaultPidsMax = 64`, `DefaultTimeout = 5m`), and **automatic graceful fallback** when running inside unprivileged local Docker containers or non-Linux hosts (`FallbackSandboxConfigurator`).
+
+    **TBD / Planned (Production — tracked in `stravin-dev/core#71`):** Strict fail-closed sandbox enforcement (`STRAVIN_GITEXEC_REQUIRE_SANDBOX`), production Kubernetes security contexts, tenant-pinned microVMs (Firecracker / Cloud Hypervisor / gVisor), and out-of-process `stravin-hook-exec` sidecars.
+
 Designing Stravin Core for multi-tenancy from day one incurs only a **minor performance delta (~5–20% compute/memory overhead and 1–5 ms latency)** when structured around tenant-boundary isolation and four zero-cost architectural seams—avoiding the orders-of-magnitude penalties of naive per-request VM churn.
 
 ## Comparing Sandboxed `git` Execution Models
@@ -21,9 +26,9 @@ A Linux container is a wrapper around namespaces, `pivot_root`, `cgroup v2`, and
 
 1. **Zero network, zero AWS access:** Spawn `git` in an empty network namespace (`CLONE_NEWNET`). The process has no outbound internet, no VPC access, and **cannot reach EC2 IMDS (`169.254.169.254`)** or ECS task metadata endpoints to steal `stravin-node`'s IAM role.
 2. **Repo-scoped filesystem view:** In a private mount namespace (`CLONE_NEWNS`), bind-mount *only* the target materialized repository directory (`/nvme/t/{tenant_id}/{repo_id}`):
-   - **Read-only (`MS_RDONLY`)** for `git-upload-pack` (`fetch` / `clone`).
-   - **Read-only repo + writable ephemeral staging directory** for `git index-pack` (when C `git` is used on the write path), preventing corruption of cached packs or sibling repositories.
-3. **Hard `cgroup v2` blast-radius caps:** Place each execution inside a per-repo or per-org `cgroup v2` slice enforcing `memory.max`, `cpu.max`, and `pids.max`. Packfile delta bombs and massive graph walks are far more frequent outage vectors than RCEs; `cgroup v2` ensures a pathological fetch OOM-kills only its own `git` process.
+    - **Read-only (`MS_RDONLY`)** for `git-upload-pack` (`fetch` / `clone`).
+    - **Read-only repo + writable ephemeral staging directory** for `git index-pack` (when C `git` is used on the write path), preventing corruption of cached packs or sibling repositories.
+3. **Hard `cgroup v2` blast-radius caps:** Place each execution inside a per-repo or per-org `cgroup v2` slice enforcing `memory.max` (default `512 MiB`), `cpu.max` (default `200000 100000`), and `pids.max` (default `64`). Packfile delta bombs and massive graph walks are far more frequent outage vectors than RCEs; `cgroup v2` ensures a pathological fetch OOM-kills only its own `git` process. In unprivileged local Docker containers without namespace/cgroup capabilities, `SubprocessExecutor` logs a one-time warning and falls back to config-locked subprocess execution; production deployments will enforce fail-closed isolation (`STRAVIN_GITEXEC_REQUIRE_SANDBOX`, **TBD / Planned**, `stravin-dev/core#71`).
 4. **Git config attack-surface lockdown:** Always invoke `git` with environment and flag overrides so repository config cannot execute auxiliary binaries:
 
 ```bash

@@ -55,46 +55,36 @@ Three properties preserve write throughput at scale:
 
 ### Read-Only `HookHostABI`
 
-Inside WebAssembly, hooks cannot fork `git rev-list`, `git diff-tree`, or `git cat-file`, and copying an entire packfile into Wasm linear memory wastes RAM. `stravin-node` exposes a minimal, bounded host-function ABI directly over the newly indexed packfile and warm repo cache:
+Inside WebAssembly, hooks cannot fork `git rev-list`, `git diff-tree`, or `git cat-file`, and copying an entire packfile into Wasm linear memory wastes RAM. `stravin-node` (`internal/hooks/wasm/abi.go`) exposes a minimal, budgeted host-function ABI under the `"stravin"` Wasm host module directly over the newly indexed packfile and warm repo cache. Both **v1** (fixed 20-byte SHA-1 OID pointers) and **v2** (length-prefixed raw or hex OIDs supporting dual-hash SHA-1 and SHA-256 repositories) exports are registered:
 
-```go
-// Host functions exposed by stravin-node to the Wasm guest.
-type HookHostABI interface {
-	// Metadata about the incoming push (actor, repo, ref transitions).
-	GetPushContext() PushContext // []RefUpdate{Ref, OldOID, NewOID}, ActorID
-
-	// Fast header-only commit inspection via commit-graph + newly indexed pack.
-	ListNewCommits(oldOID, newOID [20]byte, limit uint32) ([]CommitMeta, error)
-
-	// Changed file paths, modes, and blob sizes without loading file contents.
-	DiffTree(oldTreeOID, newTreeOID [20]byte, limit uint32) ([]TreeChange, error)
-
-	// Bounded chunked blob reader so secret scanners never blow Wasm memory caps.
-	ReadBlobChunk(blobOID [20]byte, offset uint64, maxBytes uint32) ([]byte, error)
-
-	// Emit structured allow/reject decisions (supports per-ref or whole-push reject).
-	SetVerdict(verdict HookVerdict) // ALLOW | REJECT + user-facing stderr message
-}
-```
+| Wasm Export (`"stravin"` module) | Hash Support | Description |
+| :--- | :--- | :--- |
+| `get_push_context` | SHA-1 & SHA-256 | Writes JSON `PushContext` (`actor_id`, `tenant_id`, `repo_id`, `object_format`, and `[]RefUpdate{ref, old_oid, new_oid}`) into guest memory. |
+| `list_new_commits` / `list_new_commits_v2` | v1: SHA-1 / v2: SHA-1 & SHA-256 | Fast header-only commit inspection via commit-graph + newly indexed pack, bounded by `MaxCommitsWalked`. |
+| `diff_tree` / `diff_tree_v2` | v1: SHA-1 / v2: SHA-1 & SHA-256 | Changed file paths, modes, and blob sizes without loading blob contents. |
+| `read_blob_chunk` / `read_blob_chunk_v2` | v1: SHA-1 / v2: SHA-1 & SHA-256 | Bounded chunked blob reader so secret scanners cannot exhaust Wasm linear memory or `MaxBlobBytesRead`. |
+| `set_verdict` | SHA-1 & SHA-256 | Emits structured `HookVerdict` (`ALLOW` or `REJECT`, optional per-ref verdicts, and user-facing stderr message). |
 
 Unifying Git's `pre-receive` and `update` semantics into a single Wasm invocation that returns either a global decision or per-ref verdicts avoids invoking the runtime `N` times on multi-branch pushes.
 
 ## Async Hooks: Transactional Outbox via DynamoDB Streams
 
-Because every accepted push already writes a `Ref History` item inside the atomic DynamoDB `TransactWriteItems` call, enabling **DynamoDB Streams** provides a built-in **transactional outbox** with zero extra write-path overhead:
+Because every accepted push already writes a `Ref History` item inside the atomic DynamoDB `TransactWriteItems` call, enabling **DynamoDB Streams** (`NEW_IMAGE`) provides a built-in **transactional outbox** with zero extra write-path overhead:
 
 - An accepted push is guaranteed to emit its `post-receive` event, and a rejected push can never fire a webhook.
-- A dedicated consumer pool (`stravin-hook` or Lambda/SQS fan-out) reads the stream, invokes configured outbound signed webhooks or network-enabled async Wasm modules, and manages retries, exponential backoff, and dead-letter queues completely off the `stravin-node` fleet.
-- Checks requiring external network I/O *and* merge blocking (CI tests, external security scanners, human approvals) belong in **Stravin Gate**, keeping Stravin Core fast and deterministic.
+- **`stravin-hook`** (`internal/hooks/async/`) polls DynamoDB Streams, persists per-shard sequence cursors in DynamoDB (`PK: STREAMS#CHECKPOINT, SK: SHARD#{shard_id}`), loads repository webhook rules from `SK: WEBHOOKS`, decrypts per-webhook signing secrets via KMS (`crypto.EnvelopeCipher`), and executes a GoF Chain-of-Responsibility delivery pipeline (`Tracing -> Retry/DLQ -> Safe HTTP Sender`).
+- **Signed Webhook Headers:** Every outbound HTTP `POST` carries `X-Stravin-Event` (e.g., `push`) and `X-Stravin-Signature-256` (HMAC-SHA256 hex digest of the JSON `WebhookPayload`). Private/loopback destinations are blocked by default unless `STRAVIN_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` (used in local dev).
+- **Retries & Dead-Letter Queue (DLQ):** Transient delivery failures retry with exponential backoff (defaults: `3` attempts, `100ms` initial backoff, `5s` max backoff, `10s` HTTP timeout). Exhausted deliveries are recorded to the configured `DLQSink` (structured logging DLQ by default locally; durable external DLQ queue is **TBD / Planned** for production) without blocking the stream consumer.
+- Checks requiring external network I/O *and* merge blocking (CI tests, external security scanners, human approvals) belong in **Stravin Gate** (**TBD / Planned**), keeping Stravin Core fast and deterministic.
 
 ## Resource Guardrails & Isolation Policy
 
 To ensure buggy or adversarial hooks cannot degrade `stravin-node`:
 
-- **Hard resource caps:** Enforce per-invocation linear memory limits (e.g., 16–64 MB), strict wall-clock timeouts via `wazero.NewRuntimeConfig().WithCloseOnContextDone(true)` (50 ms default, 250 ms max), and host-call budgets (e.g., max 1,000 commits walked or 10 MB of blob bytes read per push).
-- **Dedicated bulkhead pool:** Run Wasm hooks behind a bounded worker semaphore on `stravin-node` (e.g., capped at 25% of host vCPUs) so a burst of hook-heavy pushes on one repository cannot starve `git-upload-pack` reads or pack uploads for other repositories on the same host.
-- **In-process vs. sidecar boundary:** In-process `wazero` fits self-hosted enterprise deployments and trusted org-admin hooks. For public multi-tenant SaaS executing arbitrary user-uploaded Wasm, preserve the exact same `HookHostABI` contract while moving execution out-of-process into a local Unix-socket sidecar (`stravin-hook-exec` isolated with cgroup v2 and seccomp) so heap spikes or speculative-execution flaws cannot touch `stravin-node` memory.
-- **Fail-open vs. fail-closed policy:** Security hooks (secret scanning, signature verification) must configure `fail_mode: closed` to reject pushes on timeout or OOM; advisory lint hooks may configure `fail_mode: open` to emit a warning over Git's side-band stream without blocking the push.
+- **Hard resource caps (`internal/hooks/wasm/types.go`):** Enforces per-invocation linear memory limits (`MaxMemoryLimitMB = 64`), strict wall-clock timeouts via `wazero.NewRuntimeConfig().WithCloseOnContextDone(true)` (`DefaultTimeoutMS = 50`, `MaxTimeoutMS = 250`), and host-call budgets (`DefaultMaxCommitsWalked = 1000`, `DefaultMaxBlobBytesRead = 10 MiB`, `DefaultMaxHostCalls = 1024`).
+- **Dedicated bulkhead pool (`internal/hooks/wasm/bulkhead.go`):** Runs Wasm hooks behind a bounded worker semaphore on `stravin-node` so a burst of hook-heavy pushes on one repository cannot starve `git-upload-pack` reads or pack uploads for other repositories on the same host.
+- **In-process vs. sidecar boundary:** `stravin-dev/core` currently executes `wazero` in-process inside `stravin-node` (well suited for self-hosted enterprise and trusted org-admin hooks). Moving untrusted multi-tenant SaaS Wasm execution into an out-of-process Unix-socket sidecar (`stravin-hook-exec` with cgroup v2 and seccomp) while preserving the exact `HookHostABI` contract is **TBD / Planned**.
+- **Fail-open vs. fail-closed policy:** Security hooks (secret scanning, signature verification) configure `fail_mode: closed` to reject pushes on timeout or OOM; advisory lint hooks configure `fail_mode: open` to emit a warning over Git's side-band stream without blocking the push.
 
 ## Related Documents
 

@@ -24,7 +24,9 @@ flowchart LR
         Tempo[("Tempo\n(Distributed Traces)")]
     end
 
-    Grafana["Grafana\nUnified Dashboards\nMetrics -> Traces (Exemplars)\nTraces <-> Logs (trace_id / span_id)"]
+    VExp["valkey-exporter (:9121)\noliver006/redis_exporter:v1.67.0-alpine"]
+
+    Grafana["Grafana (3 Provisioned Dashboards)\nstravin-core | stravin-loadgen | stravin-valkey"]
 
     Edge -->|"OTLP/gRPC"| Collector
     Node -->|"OTLP/gRPC"| Collector
@@ -33,6 +35,7 @@ flowchart LR
     Hook -->|"OTLP/gRPC"| Collector
 
     Collector -->|"Remote Write / OTLP"| Prom
+    VExp -->|"Scrape :9121"| Prom
     Collector -->|"OTLP Logs"| Loki
     Collector -->|"OTLP Traces"| Tempo
 
@@ -93,8 +96,8 @@ sequenceDiagram
 - **Read Path (`git fetch` / `git clone`):** `stravin-edge` starts the root `edge.ingress` span (`git.operation=fetch`), propagates `traceparent` to local `stravin-node`, which records child spans for incremental DynamoDB manifest/ref queries (`ddb.query_refs`, `ddb.query_manifest`), local NVMe cache lookup (`node.cache.lookup`), concurrent local S3 pack fetches (`s3.get_pack`), optional cross-region `404 NoSuchKey` origin fallback (`s3.origin_fallback`), and sandboxed `git-upload-pack` execution (`node.git.upload_pack`).
 - **Async Outbox Continuation:** Because `stravin-node` persists the W3C `traceparent` string as a lightweight attribute on the `Ref History` item inside `TransactWriteItems`, `stravin-hook` links its asynchronous `hook.async.dispatch` and outbound webhook HTTP spans directly back to the originating `git push` trace without adding any write-path latency.
 - **Background Daemons (`stravin-pack` & `stravin-ctrl`):**
-  - `stravin-pack` opens a root trace per compaction job (`pack.compact.shard`) with child spans for lease acquisition (`ddb.lease_acquire`), S3 pack download, merge/indexing, two-phase manifest publish/supersede (`ddb.manifest_publish`, `ddb.manifest_supersede`), and delayed GC sweeps (`pack.gc.sweep`).
-  - `stravin-ctrl` opens a root trace per failover or integrity scrub cycle (`ctrl.failover.transition`, `ctrl.scrub.region`) tagged with `failover_epoch`, recording `HeadObject` verification counts and any ref rewind transactions.
+    - `stravin-pack` opens a root trace per compaction job (`pack.compact.shard`) with child spans for lease acquisition (`ddb.lease_acquire`), S3 pack download, merge/indexing, two-phase manifest publish/supersede (`ddb.manifest_publish`, `ddb.manifest_supersede`), and delayed GC sweeps (`pack.gc.sweep`).
+    - `stravin-ctrl` opens a root trace per failover or integrity scrub cycle (`ctrl.failover.transition`, `ctrl.scrub.region`) tagged with `failover_epoch`, recording `HeadObject` verification counts and any ref rewind transactions.
 
 ## Standardized Attributes & Cardinality Guardrails
 
@@ -116,32 +119,41 @@ Consistent naming across traces, logs, and metrics lets dashboards and ad-hoc Te
 | `git.protocol` | Span / Log / Metric | Wire protocol: `ssh` or `http` |
 | `git.operation` | Span / Log / Metric | Git operation: `push`, `fetch`, `clone`, `ls-refs` |
 
-### Prometheus Cardinality Guardrails
+### Prometheus Cardinality Guardrails (`GuardedMeter`)
 
 !!! warning "Unbounded Labels Never Go on Prometheus Metrics"
-    Never attach `repo_id`, `ref_name`, `pack_id`, `oid`, `actor_id`, or unbounded `tenant_id` / `hook_id` values as Prometheus metric labels. High-cardinality time series cause memory explosions in Prometheus and slow Grafana queries.
+    Never attach `repo_id`, `ref_name`, `pack_id`, `oid`, `actor_id`, `tenant_id`, `hook_id`, or `failover_epoch` as Prometheus metric labels. High-cardinality time series cause memory explosions in Prometheus and slow Grafana queries.
 
-- **Keep on Prometheus metrics:** Bounded enums and small integers (`service.name`, `region`, `git.protocol`, `git.operation`, `status_code`, `error_class`, `fail_mode`, `shard_bucket`).
+In `stravin-dev/core` (`internal/telemetry/cardinality.go`), `Provider.Meter(...)` wraps every OpenTelemetry meter in **`GuardedMeter`** (a GoF Decorator) that automatically enforces bounded cardinality at runtime:
+
+- **Forbidden labels:** `repo_id`, `ref_name`, `pack_id`, `oid`, `actor_id`, `tenant_id`, `hook_id`, `failover_epoch`.
+- **Enforcement policies:** `PolicyStrip` (default, removes forbidden attributes before recording) or `PolicyReject` (drops the datapoint entirely), with optional `WithOnViolation` callbacks for tests and alerts.
+- **Keep on Prometheus metrics:** Bounded enums and small integers (`service.name`, `region`, `git.protocol`, `git.operation`, `status_code`, `error_class`, `fail_mode`, `tier`, `result`, `shard_bucket`).
 - **Keep on Tempo traces & Loki logs:** Unbounded identifiers (`tenant_id`, `repo_id`, `ref_name`, `pack_id`, `hook_id`, `failover_epoch`).
 - **Bridge the gap with exemplars:** Use Prometheus exemplars on latency and error histograms to jump from a bounded metric bucket straight to the exact high-cardinality trace in Tempo.
 
-## Golden Signals & Grafana Dashboard Panels
+## Provisioned Grafana Dashboards & Golden Signals
 
-Every Stravin deployment ships a baseline Grafana dashboard suite organized around Golden Signals and storage-engine invariants:
+`stravin-dev/core` provisions **three cross-linked Grafana dashboards** under `deploy/local/grafana/provisioning/dashboards/`:
 
-| Dashboard Panel | Signal / Metric | Purpose & Alert Thresholds |
+1. **`stravin-core` (`stravin-core.json`):** Core Golden Signals across `stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, and `stravin-hook`, including pack-cache efficiency, upload-pack queuing, and async webhook deliveries.
+2. **`stravin-loadgen` (`stravin-loadgen.json`):** Multi-persona developer vs. AI agent load test metrics, scenario distribution, retries, and integrity oracle counters (see [Load Testing & Chaos Engineering](load-testing.md)).
+3. **`stravin-valkey` (`stravin-valkey.json`):** Dedicated Valkey cache health dashboard powered by `valkey-exporter` (`oliver006/redis_exporter:v1.67.0-alpine`, scraped by Prometheus at `valkey-exporter:9121`) tracking Valkey availability, memory utilization, LFU evictions, keyspace hit ratio, and command latency.
+
+| Dashboard Panel / Signal Group | Implemented Metrics | Purpose & Alert Thresholds |
 | :--- | :--- | :--- |
-| **Ingress RPS, Errors & Latency** | `stravin_edge_requests_total`, `stravin_edge_request_duration_seconds` (p50/p95/p99 by `git.protocol`, `git.operation`) | Tracks overall Git traffic, non-home write-proxy overhead, auth rejections, and SLO burn rate. |
+| **Ingress RPS, Errors & Concurrency (`stravin-edge`)** | `stravin_edge_requests_total`, `stravin_edge_request_duration_seconds`, `stravin_edge_active_clones`, `stravin_edge_meta_cache_lookups_total`, `stravin_edge_info_refs_retries_total` | Tracks overall Git traffic, non-home write-proxy overhead, META cache hit rate, active clone slots, and Smart HTTP `info/refs` transient retries. |
+| **Tiered Pack Response Cache (`stravin-edge`)** | `stravin_edge_pack_cache_lookups_total`, `stravin_edge_pack_cache_writes_total`, `stravin_edge_pack_cache_op_duration_seconds`, `stravin_edge_pack_cache_bytes_total`, `stravin_edge_valkey_pool_dials_total` | Measures hit/miss rates and latency across `singleflight`, `valkey`, and `s3` tiers, cached bytes served, and Valkey connection pool reuse. |
+| **`stravin-node` Requests, NVMe Cache & Queueing** | `stravin_node_requests_total`, `stravin_node_request_duration_seconds`, `stravin_node_cache_hits_total` / `misses_total`, `stravin_node_cache_bytes_used`, `stravin_node_s3_pack_fetches_total`, `stravin_node_aux_index_refresh_failures_total`, `stravin_node_upload_pack_queue_wait_seconds`, `stravin_node_upload_pack_queue_timeouts_total` | Tracks warm NVMe cache efficiency, S3 fetches, `.midx`/commit-graph refresh health, and `upload-pack` concurrency semaphore queueing/timeouts. |
 | **CAS Conflict & Retry Rate** | `stravin_ddb_transact_total{result="ok\|conflict\|throttled"}`, `stravin_ddb_cas_retries_total` | Detects hot-ref contention, DynamoDB partition throttling, or adaptive sharding thresholds (`S`/`M`) that need expansion. |
 | **S3 Put/Get & Origin-Fallback Rate** | `stravin_s3_ops_total{op="put\|get\|head",result}`, `stravin_s3_origin_fallback_total` | Monitors regional S3 health and spikes in cross-region `404 NoSuchKey` origin fallback caused by S3 CRR lag. |
-| **Wasm Hook Duration, Timeouts & Rejections** | `stravin_hook_wasm_duration_seconds`, `stravin_hook_wasm_verdicts_total{verdict="allow\|reject\|timeout\|oom"}` | Verifies Tier 1 hooks stay hidden inside the S3 upload window (1–10 ms target) and flags misbehaving or bulkhead-throttled hooks. |
-| **NVMe Cache Hit Ratio & Tenant Bytes** | `stravin_node_cache_hits_total` / `misses_total`, `stravin_node_cache_bytes_used` | Tracks warm bare-repo cache efficiency after rendezvous routing and detects noisy-neighbor NVMe eviction pressure. |
-| **Compaction Lag (`stravin-pack`)** | `stravin_pack_uncompacted_packs`, `stravin_pack_compaction_lag_seconds`, `stravin_pack_gc_reaped_total` | Ensures L0 push packs are consolidated before read fan-out degrades `git-upload-pack` latency. |
+| **Wasm Sync Hooks & Async Deliveries (`stravin-hook`)** | `stravin_hook_wasm_duration_seconds`, `stravin_hook_wasm_verdicts_total`, `stravin_hook_deliveries_total{result="ok\|retry\|dlq\|error"}`, `stravin_hook_delivery_duration_seconds`, `stravin_hook_stream_records_total` | Verifies Tier 1 hooks stay hidden inside the S3 upload window and tracks Tier 2 DynamoDB Streams processing, webhook latency, retries, and DLQ drops. |
+| **Compaction Lag (`stravin-pack`)** | `stravin_pack_uncompacted_packs`, `stravin_pack_compaction_lag_seconds`, `stravin_pack_gc_reaped_total` | Ensures Tier-0 push packs are consolidated before read fan-out degrades `git-upload-pack` latency. |
 | **Telemetry Dropped** | `otelcol_exporter_enqueue_failed_spans`, `stravin_otel_dropped_items_total` | Surfaces genuine bounded queue overflows in the Go OTel SDK batch processor or Collector ingress buffers so blind spots never go unnoticed. |
 
 ## Local vs. Production Telemetry
 
-| Concern | Local Development (`--profile telemetry`) | Production Deployment |
+| Concern | Local Development (`--profile telemetry`, Implemented) | Production Deployment (**TBD / Planned**) |
 | :--- | :--- | :--- |
 | **Collector Topology** | Single OTel Collector container in Docker Compose receiving OTLP/gRPC on `:4317` from all daemons. | Node-local OTel Collector DaemonSet (fast loopback OTLP) forwarding to a horizontally scaled Collector Gateway tier. |
 | **Sampling Strategy** | **100% head sampling** so every local `git push` and `git fetch` appears immediately in Tempo. | **Tail-based sampling** at the Collector Gateway: retain 100% of error traces, CAS conflicts, origin fallbacks, slow p99 requests, and failover scrubs; sample routine fast `200 OK` requests (e.g., 1–5%). |

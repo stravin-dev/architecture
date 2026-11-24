@@ -1,6 +1,11 @@
 # Stravin Architecture & Design
 
-**Stravin** is a stateless, multi-region hosted Git platform built in Go on AWS S3 and DynamoDB. It separates durable object storage from reference linearization so repositories scale to thousands of concurrent pushes per second without penalizing home-region write latency for cross-region high availability.
+**Stravin** is a stateless, multi-region hosted Git platform built in Go on AWS S3 and DynamoDB. It separates durable object storage from reference linearization so repositories scale to high concurrent push and fetch rates without penalizing home-region write latency for cross-region high availability.
+
+!!! info "Current Implementation Status (`stravin-dev/core` `v1.12.x`)"
+    **Implemented today:** `stravin-dev/core` (`v1.12.x`) ships the full local Docker Compose development experience backed by **Floci** (S3, DynamoDB, DynamoDB Streams, KMS), **Valkey** (external pack-response cache tier), and the **OpenTelemetry + Grafana LGTM** observability stack, with well-defined service interfaces across all five Go daemons (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, `stravin-hook`), the `stravin-admin` CLI, `stravin-loadgen`, and `stravin-chaos`.
+
+    **TBD / Planned (not yet built):** Production Kubernetes deployment manifests, autoscaling controllers (HPA/KEDA), real AWS multi-region provisioning, and the upper product layers (`Stravin Review`, `Stravin Run`, `Stravin Index`, and `Stravin Gate`).
 
 ## Platform Overview
 
@@ -20,12 +25,13 @@ Stravin separates brand identity from operational clarity across three tiers:
 
 1. **Umbrella Platform (`Stravin`):** A coined two-syllable root (*strata* for layered S3 packfiles and compaction tiers + *rivet/tenon* for atomic immutable binding). Avoiding Git-specific terms at the umbrella level lets CI, code review, search, and merge queues sit cleanly underneath.
 2. **Product Layers (`Stravin <Noun>`):** Each functional layer pairs the platform name with a single plain noun: `Stravin Core`, `Stravin Review`, `Stravin Run`, `Stravin Index`, and `Stravin Gate`.
-3. **Go Daemons (`stravin-<role>`):** Every service binary, container image, and `cmd/` package maps directly to its operational role:
-   - `stravin-edge` — SSH / Smart HTTP ingress, authentication, and home-region routing proxy
-   - `stravin-node` — Stateless virtual Git replica with warm NVMe bare-repo caches and Wasm sync hook execution
-   - `stravin-pack` — Out-of-band sharded packfile compaction, index generation, and delayed garbage collection
-   - `stravin-ctrl` — Multi-region failover orchestration, fencing epochs, and post-failover integrity scrubbing
-   - `stravin-hook` — Asynchronous post-receive hook and webhook worker pool consuming DynamoDB Streams
+3. **Go Daemons & Admin CLI (`stravin-<role>`):** Every service binary, container image, and `cmd/` package maps directly to its operational role:
+    - `stravin-edge` — SSH / Smart HTTP ingress, authentication, tiered Valkey + S3 full-clone pack response cache, and home-region routing proxy
+    - `stravin-node` — Stateless virtual Git replica with warm NVMe bare-repo caches, pure-Go Protocol v2 `ls-refs`, and `wazero` Wasm sync hook execution
+    - `stravin-pack` — Out-of-band sharded packfile compaction, index generation, and delayed garbage collection
+    - `stravin-ctrl` — Multi-region failover orchestration, regional write leases, fencing epochs, and post-failover integrity scrubbing
+    - `stravin-hook` — Asynchronous post-receive hook and signed webhook worker pool consuming DynamoDB Streams
+    - `stravin-admin` (`cmd/stravin-admin`) — Operational CLI for managing repositories (`repo`), Tier 1 Wasm hooks (`hook`), and Tier 2 webhooks (`webhook`)
 
 ## Organization Repositories & Licensing
 
@@ -59,7 +65,8 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 
 ## Operations & Tooling
 
-- [Local Development](operations/local-dev.md) — Docker Compose local development stack using Floci for AWS emulation (S3, DynamoDB, Streams, KMS), bootstrap workflow, and the upstream Floci PR policy for missing AWS features.
-- [Telemetry & Observability](operations/telemetry.md) — Full OpenTelemetry and Grafana LGTM (Loki, Grafana, Tempo, Prometheus) architecture, end-to-end distributed trace flows, attribute/cardinality guardrails, and Golden Signals dashboards.
-- [Service Scaling](operations/scaling.md) — Horizontal vs. vertical scaling playbooks for all five Go daemons, telemetry-driven scale-out/scale-in triggers, graceful drain behavior, and anti-thrashing guardrails.
-- [Zero-Downtime Deployment](operations/deployment.md) — Tool-agnostic Kubernetes rollout strategy covering N/N-1 compatibility, 4-wave regional ordering (rolling and canary), multi-region progression, and telemetry-gated rollbacks.
+- [Local Development](operations/local-dev.md) — Docker Compose local development stack using Floci (S3, DynamoDB, Streams, KMS), Valkey, bootstrap seeding, `make load-test` / `make chaos-e2e`, and the upstream Floci PR policy.
+- [Telemetry & Observability](operations/telemetry.md) — Full OpenTelemetry and Grafana LGTM (Loki, Grafana, Tempo, Prometheus) architecture, provisioned dashboards (`stravin-core`, `stravin-loadgen`, `stravin-valkey`), `valkey-exporter`, and `GuardedMeter` cardinality enforcement.
+- [Load Testing & Chaos Engineering](operations/load-testing.md) — Standalone `stravin-loadgen` (22 developer and AI agent Git scenarios, `BaseCloneCache`, `git fsck` oracle) and Toxiproxy `stravin-chaos` fault injection.
+- [Service Scaling](operations/scaling.md) — Horizontal vs. vertical scaling playbooks and telemetry-driven triggers for all five Go daemons (**TBD / Planned** for production Kubernetes).
+- [Zero-Downtime Deployment](operations/deployment.md) — Tool-agnostic Kubernetes rollout strategy covering N/N-1 compatibility, 4-wave regional ordering, and telemetry-gated rollbacks (**TBD / Planned** for production Kubernetes).
