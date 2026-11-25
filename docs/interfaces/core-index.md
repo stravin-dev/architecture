@@ -8,7 +8,7 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 | :--- | :--- | :--- |
 | **Repository metadata (`default_branch`, `object_format`), refs, commits, trees, blobs** | **Stravin Core** | S3 packfiles, `.midx`/`.graph` aux files, DynamoDB sharding, compaction lifecycle |
 | **Trigram inverted indexes, AST symbol tables, cross-repo reference graphs, indexed-commit watermarks** | **Stravin Index** | Zoekt/trigram shard storage, tree-sitter/LSIF/SCIP parsers, query planner, ranker |
-| **Change notification stream (which refs/commits moved)** | **Stravin Core** (`stravin-hook` / DynamoDB Streams) | Stream shard leases, retry queues, DLQ storage |
+| **Change notification stream (which refs/commits moved)** | **Stravin Core** (`stravin-hook` in `v1.12.x`; `stravin-relay` in `vNext` / DynamoDB Streams) | Stream shard leases, retry queues, DLQ storage |
 | **Tombstone / repository deletion signals** | **Stravin Core** (lifecycle event) -> **Stravin Index** (purge) | Core deletes/archives repo state; Index purges all shards for `(tenant_id, repo_id)` |
 
 ## 2. Interaction Flow
@@ -16,14 +16,14 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 ```mermaid
 sequenceDiagram
     participant Node as Stravin Core (stravin-node)
-    participant Hook as Stravin Core (stravin-hook)
+    participant Relay as Stravin Core (stravin-relay)
     participant NATS as NATS JetStream (STRAVIN_CORE)
     participant Index as Stravin Index (Ingestor)
     participant Edge as Stravin Core (stravin-edge)
 
     Node->>Node: Atomic push commit (RS + RH + MS)
-    Note over Node,Hook: DynamoDB Streams INSERT on RH#s
-    Hook->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
+    Note over Node,Relay: DynamoDB Streams INSERT on RH#s
+    Relay->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
     NATS-->>Index: Durable pull consumer (index-core-ingest) or stream replay
     Index->>Index: Check if ref matches indexed set (default_branch / configured refs)
     alt Incremental Update (prev_oid already indexed)
@@ -98,7 +98,7 @@ message BatchReadBlobsRequest {
 ### 5.1 Core -> Index: Ref Update & Repo Lifecycle Events (`STRAVIN_CORE` JetStream)
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently delivers flat signed HTTP `push` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) with `{tenant_id, repo_id, ref, oid, pack_id, timestamp}`.
-- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes to stream `STRAVIN_CORE` (retained 7–14 days for replay) with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers:
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes to stream `STRAVIN_CORE` (retained 7–14 days for replay) with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers:
     - `stravin.core.<tenant_id>.<repo_id>.ref.updated`: Adds `prev_oid`, `ulid`, `epoch`, `object_format`, and `default_branch` so Index can immediately decide whether to ingest a ref without a metadata round-trip.
     - `stravin.core.<tenant_id>.<repo_id>.repo.meta_updated`: Fired when `default_branch` changes so Index swaps its default search branch.
     - `stravin.core.<tenant_id>.<repo_id>.repo.deleted`: Tombstone event carrying `{tenant_id, repo_id, deleted_at, ulid}` requiring Index to purge all search shards and symbol graphs for the repository within its compliance SLA.
@@ -126,7 +126,7 @@ message BatchReadBlobsRequest {
 - [ ] Expose `default_branch` and `object_format` consistently in `META` (Implemented in Core v1.12.x).
 - [ ] Support partial clone/fetch blob-size filters over Smart HTTP Protocol v2 (Implemented via `git-upload-pack` in Core v1.12.x).
 - [ ] Implement `stravin.core.v1.IndexFeed` (`GetRepoMetadata`, `DiffCommitTrees`, `BatchReadBlobs`) on `stravin-node` with constant-time app-level `tenant_id` check (vNext).
-- [ ] Publish `ref.updated`, `repo.meta_updated`, and `repo.deleted` to `STRAVIN_CORE` JetStream from `stravin-hook` with `Nats-Msg-Id` and `traceparent` (vNext).
+- [ ] Publish `ref.updated`, `repo.meta_updated`, and `repo.deleted` to `STRAVIN_CORE` JetStream from `stravin-relay` (renamed from `stravin-hook` in `vNext`) with `Nats-Msg-Id` and `traceparent` (vNext).
 
 ### Side B: Stravin Index Build Checklist
 

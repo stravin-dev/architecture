@@ -2,7 +2,7 @@
 
 This specification defines the meet-in-the-middle contract between internal **NATS JetStream Platform Events** (emitted by **Stravin Core**, **Stravin Review**, **Stravin Run**, and **Stravin Gate**) and **Stravin Webhooks** (`stravin-webhooks`), the dedicated outbound customer and third-party HTTP webhook delivery service.
 
-> **Contract Status:** **Proposed Contract (vNext)** — See [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflow Seam](../adr/0001-platform-transport-events-webhooks.md). In Core `v1.12.x`, `stravin-hook` (`internal/hooks/async/dispatcher.go`) currently dispatches flat HTTP `POST` push webhooks directly; `stravin-webhooks` extracts and generalizes external delivery for all Stravin products in `vNext`.
+> **Contract Status:** **Proposed Contract (vNext)** — See [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflow Seam](../adr/0001-platform-transport-events-webhooks.md). In Core `v1.12.x`, `stravin-hook` (`cmd/stravin-hook`, `internal/hooks/async/dispatcher.go`) currently dispatches flat HTTP `POST` push webhooks directly; in `vNext`, Core renames this daemon to `stravin-relay` (pure DynamoDB Streams -> NATS JetStream outbox relay) while `stravin-webhooks` extracts and generalizes external delivery for all Stravin products.
 
 ## 1. Boundary & Ownership
 
@@ -154,7 +154,7 @@ The JSON body carries the public-safe projection of the Standard Async Event Env
 - [ ] Publish all externally subscribable events to canonical NATS JetStream subjects `stravin.<product>.<tenant_id>.<repo_id>.<event>`.
 - [ ] Populate `Nats-Msg-Id` with `idempotency_key` and include W3C `traceparent` in NATS headers.
 - [ ] Never embed internal secrets, raw IAM tokens, or unredacted internal hostnames in event `data` payloads.
-- [ ] Keep Core (`stravin-hook`), Review, Run, and Gate free of outbound customer HTTP delivery logic in `vNext`.
+- [ ] Keep Core (`stravin-relay`), Review, Run, and Gate free of outbound customer HTTP delivery logic in `vNext`.
 
 ### Side B: Stravin Webhooks (`stravin-webhooks`)
 

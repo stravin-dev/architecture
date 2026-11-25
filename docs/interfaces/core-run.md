@@ -8,7 +8,7 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 | :--- | :--- | :--- |
 | **Git refs, commits, packfiles, Valkey+S3 pack cache, precomputed bundles** | **Stravin Core** | S3 pack sharding, DynamoDB Ref-CAS, Valkey/S3 spillover thresholds, `stravin-node` NVMe cache |
 | **Pipeline definitions, runner scheduling, VM/container sandboxes, build logs, artifacts** | **Stravin Run** | MicroVM/Firecracker pool, runner autoscaling, artifact storage, secret vault |
-| **Trigger events (push, tag creation, ref updates)** | **Stravin Core** (`stravin-hook`) | DynamoDB Streams shard checkpointing and DLQ internals |
+| **Trigger events (push, tag creation, ref updates)** | **Stravin Core** (`stravin-hook` in `v1.12.x`; `stravin-relay` in `vNext`) | DynamoDB Streams shard checkpointing and DLQ internals |
 | **Clone/fetch authorization for ephemeral runners** | **Stravin Core** (enforcement) / **Stravin Run** (token request) | Core validates short-lived scoped tokens at `stravin-edge`; Run injects them into runner git credentials |
 
 ## 2. Interaction Flow
@@ -16,7 +16,7 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 ```mermaid
 sequenceDiagram
     participant Node as Stravin Core (stravin-node)
-    participant Hook as Stravin Core (stravin-hook)
+    participant Relay as Stravin Core (stravin-relay)
     participant NATS as NATS JetStream (STRAVIN_CORE)
     participant Run as Stravin Run (Scheduler / Future Temporal Seam)
     participant Runner as Stravin Run (Ephemeral Runner)
@@ -24,8 +24,8 @@ sequenceDiagram
     participant Cache as Valkey + S3 Pack Cache / Bundle
 
     Node->>Node: Commit push to DynamoDB (RS + RH + MS)
-    Note over Node,Hook: DynamoDB Streams INSERT on RH#s
-    Hook->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
+    Note over Node,Relay: DynamoDB Streams INSERT on RH#s
+    Relay->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
     NATS-->>Run: Durable consumer delivery (run-core-triggers)
     Run->>Run: Match trigger rules (ref glob, tag, workflow YAML)
     Run->>Edge: Request short-lived git:read token (Cilium eBPF mTLS) [vNext]
@@ -111,7 +111,7 @@ Response (`200 OK`):
 ### 5.1 Core -> Run: Push & Tag Trigger Events (`STRAVIN_CORE` JetStream)
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently dispatches flat signed HTTP `POST` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) for every `RH#s` INSERT matching the repo's configured `ref_glob` (e.g., `refs/heads/*`, `refs/tags/*`).
-- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes Standard Async Event Envelopes to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` in NATS headers. The payload includes `data.prev_oid`, `data.ulid`, `data.object_format`, and `data.deleted` (true when `oid` is zero OID) so Run can distinguish tag creation, branch deletion (cancelling superseded runs), and force-pushes without an extra round-trip.
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes Standard Async Event Envelopes to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` in NATS headers. The payload includes `data.prev_oid`, `data.ulid`, `data.object_format`, and `data.deleted` (true when `oid` is zero OID) so Run can distinguish tag creation, branch deletion (cancelling superseded runs), and force-pushes without an extra round-trip.
 - **Durable Consumer & Future Temporal Seam:** Run binds durable pull consumer `run-core-triggers` on `stravin.core.*.*.ref.updated`. Trigger ingestion maps each unique `idempotency_key` to a single idempotent pipeline start command (future **Temporal** workflow start with `WorkflowID = <tenant_id>:<repo_id>:<commit_oid>:<workflow>`), keeping Core completely decoupled from Run's internal orchestration engine.
 - **Workflow File Fetch:** Run fetches `.stravin/workflows/*.yaml` at the exact `commit_oid` (via `git archive`/shallow fetch today, or `GitData.StreamBlob` in vNext) before scheduling jobs.
 
@@ -137,7 +137,7 @@ Response (`200 OK`):
 - [ ] Maintain Protocol v2 `TieredPackCache` (Valkey + S3 spillover) and `PackCacheCoordinator` singleflight (Implemented in Core v1.12.x).
 - [ ] Add `POST /internal/v1/tokens/git` short-lived scoped token minting on `stravin-edge` with app-level `tenant_id` check (vNext).
 - [ ] Wire `bundle-uri` capability advertisement and presigned URL generation for `s3.BundleKey` (vNext).
-- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to NATS JetStream from `stravin-hook` with `Nats-Msg-Id`, `prev_oid`, `ulid`, and `traceparent` (vNext).
+- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to NATS JetStream from `stravin-relay` (renamed from `stravin-hook` in `vNext`) with `Nats-Msg-Id`, `prev_oid`, `ulid`, and `traceparent` (vNext).
 
 ### Side B: Stravin Run Build Checklist
 

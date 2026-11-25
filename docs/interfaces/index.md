@@ -90,8 +90,8 @@ All nine interface specifications reuse the vocabulary, Cilium + app-level secur
 
 ### Internal Async Event Backbone (NATS JetStream) & Standard Event Envelope
 
-- **Implemented in Core v1.12.x:** `stravin-hook` (`internal/hooks/async/dispatcher.go`) currently posts a flat push payload (`tenant_id`, `repo_id`, `ref`, `oid`, `pack_id`, `timestamp`) directly over HTTP `POST` with headers `X-Stravin-Event: push`, `X-Stravin-Signature-256: sha256=<hex>`, and `traceparent`.
-- **Proposed Platform Architecture (vNext — NATS JetStream):** All *internal* product-to-product async events publish to **NATS JetStream** (3- or 5-pod Raft-replicated `StatefulSet` + PVCs in Kubernetes; single `nats` container with volume in local Docker Compose). Outbound customer/third-party HTTP delivery and `X-Stravin-Signature-256` signing are handled exclusively by [Stravin Webhooks (`stravin-webhooks`)](external-webhooks.md).
+- **Implemented in Core v1.12.x:** `stravin-hook` (`cmd/stravin-hook`, `internal/hooks/async/dispatcher.go`) currently posts a flat push payload (`tenant_id`, `repo_id`, `ref`, `oid`, `pack_id`, `timestamp`) directly over HTTP `POST` with headers `X-Stravin-Event: push`, `X-Stravin-Signature-256: sha256=<hex>`, and `traceparent`.
+- **Proposed Platform Architecture (vNext — NATS JetStream):** All *internal* product-to-product async events publish to **NATS JetStream** (3- or 5-pod Raft-replicated `StatefulSet` + PVCs in Kubernetes; single `nats` container with volume in local Docker Compose). In Core `vNext`, `stravin-hook` is renamed to **`stravin-relay`**—a pure DynamoDB Streams -> NATS JetStream transactional outbox relay with zero Wasm and zero external HTTP delivery. Outbound customer/third-party HTTP delivery and `X-Stravin-Signature-256` signing are handled exclusively by [Stravin Webhooks (`stravin-webhooks`)](external-webhooks.md).
 
 **Canonical Subject Hierarchy:**
 

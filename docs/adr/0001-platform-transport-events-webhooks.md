@@ -34,9 +34,9 @@ flowchart TB
         subgraph CoreBox["Stravin Core"]
             Edge["stravin-edge\n(HRW pinning via Headless Service)"]
             Node["stravin-node\n(256 MiB Git streams + GitData/GateOps/IndexFeed)"]
-            Hook["stravin-hook\n(DDB Streams -> JetStream Publisher vNext)"]
+            Relay["stravin-relay\n(DDB Streams -> JetStream Outbox vNext)"]
             Edge <-->|"gRPC GitWire/Stream (0 extra proxy hop)"| Node
-            Node -.->|"DynamoDB Streams"| Hook
+            Node -.->|"DynamoDB Streams"| Relay
         end
 
         NATS["NATS JetStream Cluster\n(3- or 5-pod Raft StatefulSet + PVCs)\nstravin.<product>.<tenant_id>.<repo_id>.<event>"]
@@ -58,7 +58,7 @@ flowchart TB
 
         Webhooks["Stravin Webhooks (stravin-webhooks)\n(Dedicated Egress CiliumNetworkPolicy,\nKMS HMAC-SHA256, SSRF Guard, DLQ/Replay)"]
 
-        Hook -->|"Publish stravin.core.>"| NATS
+        Relay -->|"Publish stravin.core.>"| NATS
         Review <-->|"Publish / Consume stravin.review.>"| NATS
         RunAPI <-->|"Publish / Consume stravin.run.>"| NATS
         GateAPI <-->|"Publish / Consume stravin.gate.>"| NATS
@@ -115,9 +115,10 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
     - **Deduplication:** Publishers set the native `Nats-Msg-Id` header equal to the envelope's `idempotency_key`, leveraging JetStream's server-side deduplication window alongside consumer-side idempotency.
     - **Dead-Letter Queue (DLQ):** Exhausted messages (`MaxDeliver` exceeded) trigger JetStream advisory events (`$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>`) routed into a dedicated `STRAVIN_DLQ` stream for alerting and replay.
     - **Trace Context Propagation:** Publishers inject W3C `traceparent` (and optional `tracestate` / `baggage`) directly into NATS message headers so consumers link OpenTelemetry spans via `SpanLinkFromTraceparent`.
-- **Current Core Status Badge:**
-    - **Implemented in Core v1.12.x:** `stravin-hook` (`internal/hooks/async/dispatcher.go`) currently dispatches flat HTTP `POST` push webhooks directly from DynamoDB Streams.
-    - **Proposed Core Extension (vNext):** `stravin-hook` publishes Standard Async Event Envelopes to NATS JetStream (`stravin.core.<tenant_id>.<repo_id>.*`), decoupling Core from downstream consumer availability and external HTTP delivery.
+- **Core Outbox Daemon Rename (`stravin-hook` -> `stravin-relay` in `vNext`):**
+    - **Implemented in Core v1.12.x:** `stravin-hook` (`cmd/stravin-hook`, `internal/hooks/async/dispatcher.go`) currently polls DynamoDB Streams and dispatches flat HTTP `POST` push webhooks directly.
+    - **Proposed Core Extension (vNext):** Rename `stravin-hook` to **`stravin-relay`**—a pure, lightweight transactional outbox relay that tails DynamoDB Streams and publishes Standard Async Event Envelopes to NATS JetStream (`stravin.core.<tenant_id>.<repo_id>.*`), decoupling Core from downstream consumer availability and external HTTP delivery. `stravin-relay` runs **zero Wasm** and sends **zero external HTTP webhooks**.
+    - **Future Server-Side Async (`post-receive`) Wasm Hooks Boundary:** Synchronous Tier 1 (`pre-receive` / `update`) Wasm hooks remain inside `stravin-node`. If server-side asynchronous `post-receive` Wasm hooks are added in the future, they MUST run as a separate NATS JetStream consumer—never inside `stravin-relay`—so slow or buggy Wasm execution cannot stall the DynamoDB Streams outbox cursor for `Review`, `Run`, `Index`, `Gate`, and `stravin-webhooks`.
 
 ### Pillar 3: Separate External Webhooks Service (`stravin-webhooks` / Stravin Webhooks)
 
@@ -162,13 +163,13 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
 
 - **New stateful infrastructure dependency:** Operating NATS JetStream adds a Raft-replicated `StatefulSet` (3–5 pods + PVCs) to production Kubernetes operations, monitoring, and backup runbooks.
 - **Application-level tenancy remains mandatory:** Because Cilium authenticates workloads rather than tenants, every service must enforce `tenant_id` checks in code and contract tests (defense-in-depth, not delegated to the mesh).
-- **Two-phase migration from Core `v1.12.x`:** Core must temporarily support both legacy `stravin-hook` direct HTTP push webhooks (`v1.12.x`) and JetStream publishing (`vNext`) during transition.
+- **Two-phase migration from Core `v1.12.x`:** Core must temporarily support both legacy `stravin-hook` direct HTTP push webhooks (`v1.12.x`) and `stravin-relay` JetStream outbox publishing (`vNext`) during transition.
 
 ## Migration Path (`v1.12.x` -> `vNext`)
 
 1. **Phase 1 — Local Dev & JetStream Addition:** Add a single `nats` container (`-js`, persistent volume) to `stravin-dev/core`'s `docker-compose.yml` alongside Floci and Valkey. Keep `v1.12.x` `stravin-hook` HTTP webhook delivery intact as the default.
-2. **Phase 2 — Core `stravin-hook` JetStream Publisher (vNext):** Add a JetStream publisher sink to `stravin-hook` emitting Standard Async Event Envelopes to `stravin.core.<tenant_id>.<repo_id>.ref.updated` (with `Nats-Msg-Id` = `idempotency_key` and `traceparent` header), reading from the existing DynamoDB Streams transactional outbox.
-3. **Phase 3 — Extract External Webhooks (`stravin-webhooks`):** Stand up `stravin-webhooks` subscribing to `stravin.core.>` (and later `review`, `run`, `gate`), migrating outbound customer webhook rules (`SK: WEBHOOKS`), KMS signing secrets, retries, and DLQ out of `stravin-hook`.
+2. **Phase 2 — Core `stravin-relay` JetStream Outbox (vNext):** Rename `stravin-hook` to **`stravin-relay`** (preserving `v1.12.x` compatibility during rollout) and add the JetStream publisher sink emitting Standard Async Event Envelopes to `stravin.core.<tenant_id>.<repo_id>.ref.updated` (with `Nats-Msg-Id` = `idempotency_key` and `traceparent` header), reading from the existing DynamoDB Streams transactional outbox.
+3. **Phase 3 — Extract External Webhooks (`stravin-webhooks`):** Stand up `stravin-webhooks` subscribing to `stravin.core.>` (and later `review`, `run`, `gate`), migrating outbound customer webhook rules (`SK: WEBHOOKS`), KMS signing secrets, retries, and DLQ out of legacy `stravin-hook` so `stravin-relay` runs zero Wasm and sends zero external HTTP webhooks.
 4. **Phase 4 — Upper Product Consumers & Temporal Seam:** Build Review, Run, Index, and Gate against NATS JetStream subjects and idempotent command APIs. Introduce Temporal behind Run and Gate only when workflow complexity (multi-stage DAG retries, long-lived merge-queue bisection) justifies the operational footprint.
 5. **Phase 5 — Production Kubernetes + Cilium (TBD / Planned):** Deploy Cilium eBPF CNI with WireGuard/SPIFFE mTLS, headless `stravin-node` Service for `stravin-edge` HRW routing, and per-service `CiliumNetworkPolicy` manifests (including dedicated egress policy for `stravin-webhooks`).
 

@@ -18,7 +18,7 @@ sequenceDiagram
     actor Dev as Developer / Agent
     participant Edge as Stravin Core (stravin-edge)
     participant Node as Stravin Core (stravin-node)
-    participant Hook as Stravin Core (stravin-hook)
+    participant Relay as Stravin Core (stravin-relay)
     participant NATS as NATS JetStream (STRAVIN_CORE)
     participant Review as Stravin Review
 
@@ -28,8 +28,8 @@ sequenceDiagram
     Node->>Node: DynamoDB TransactWriteItems (RS + RH + MS)
     Node-->>Dev: Push ACK (new commit_oid)
 
-    Note over Node,Hook: DynamoDB Streams transactional outbox (RH#s INSERT)
-    Hook->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
+    Note over Node,Relay: DynamoDB Streams transactional outbox (RH#s INSERT)
+    Relay->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
     NATS-->>Review: Durable consumer delivery (review-core-refs)
     Review->>Review: Match branch to open PRs / stacked diffs
     Review->>Node: gRPC GitData.CompareDiff(base_oid, head_oid) [vNext]
@@ -115,7 +115,7 @@ When Review submits a commit (e.g., applying a suggested change or resolving a c
 ### 5.1 Core -> Review: Ref Update Event (`STRAVIN_CORE` JetStream)
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently consumes DynamoDB Streams `INSERT` on `RH#s` and POSTs flat HTTP `WebhookPayload` (`tenant_id`, `repo_id`, `ref`, `oid`, `pack_id`, `timestamp`) with headers `X-Stravin-Event: push`, `X-Stravin-Signature-256: sha256=<hex>`, and `traceparent`.
-- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes the Standard Async Event Envelope to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with NATS headers `Nats-Msg-Id: <idempotency_key>`, `Stravin-Event-Type: core.ref.updated`, `Stravin-Schema-Version: 1.0`, and `traceparent`:
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes the Standard Async Event Envelope to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with NATS headers `Nats-Msg-Id: <idempotency_key>`, `Stravin-Event-Type: core.ref.updated`, `Stravin-Schema-Version: 1.0`, and `traceparent`:
 
 ```json
 {
@@ -163,7 +163,7 @@ When Review submits a commit (e.g., applying a suggested change or resolving a c
 ### Side A: Stravin Core Build Checklist
 
 - [ ] Preserve `stravin-hook` per-ref `RH#s` ordering and `traceparent` propagation (Implemented in Core v1.12.x).
-- [ ] Add NATS JetStream publisher to `stravin-hook` targeting `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id` = `idempotency_key` and additive fields (`prev_oid`, `ulid`, `epoch`, `actor_id`, `object_format`) (vNext).
+- [ ] Rename `stravin-hook` to `stravin-relay` and add NATS JetStream publisher targeting `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id` = `idempotency_key` and additive fields (`prev_oid`, `ulid`, `epoch`, `actor_id`, `object_format`) (vNext).
 - [ ] Implement read-only `stravin.core.v1.GitData` gRPC service on `stravin-node` with constant-time app-level `tenant_id` authorization (vNext).
 - [ ] Support short-lived scoped tokens with `actor_id` forwarding to Wasm `PushContext` (vNext).
 

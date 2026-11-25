@@ -119,7 +119,7 @@ message RefTransition {
 ### 5.1 Core -> Gate: Protected-Ref Drift Notifications (`STRAVIN_CORE` JetStream)
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently emits flat signed HTTP `push` webhooks for protected branches (`refs/heads/main`, etc.).
-- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes to `STRAVIN_CORE` on `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers. Gate binds durable pull consumer `gate-core-drift` on `stravin.core.*.*.ref.updated`.
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes to `STRAVIN_CORE` on `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers. Gate binds durable pull consumer `gate-core-drift` on `stravin.core.*.*.ref.updated`.
 - **Why Gate Subscribes & Future Temporal Seam:** If an authorized bypass push (e.g., break-glass admin push) or a `stravin-ctrl` failover rewind mutates `refs/heads/main` out-of-band, Gate receives `core.ref.updated` with `(ref, oid, prev_oid, epoch)`, immediately invalidates in-flight speculative queue entries built on the stale base, and rebuilds the speculative chain from the new `oid`. Because `ComputeMergeTree` and `AtomicRefCAS` are strictly idempotent (keyed by `idempotency_key` and fenced by `old_oid` + `expected_epoch`) and drift arrives as JetStream events, Gate can later adopt **Temporal** internally to drive its speculative rebase/cancel/promote state machine (signaling the queue workflow on `core.ref.updated` and calling `GateOps` as idempotent activities) without changing Core's wire contract. Core itself remains Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
@@ -144,7 +144,7 @@ message RefTransition {
 - [ ] Maintain dual-hash `HookHostABI` v2, `fail_mode: closed`, and `stravin-ctrl` lease/epoch endpoints (Implemented in Core v1.12.x).
 - [ ] Expose HTTP/gRPC Admin API wrapping `internal/admin.Service.ConfigureWasmHook` for automated Gate policy deployment (vNext).
 - [ ] Implement idempotent `stravin.core.v1.GateOps` (`ComputeMergeTree`, `AtomicRefCAS` with `expected_epoch`, `idempotency_key`, and app-level `tenant_id` check) on `stravin-node` (vNext).
-- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to `STRAVIN_CORE` JetStream from `stravin-hook` (vNext).
+- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to `STRAVIN_CORE` JetStream from `stravin-relay` (renamed from `stravin-hook` in `vNext`) (vNext).
 
 ### Side B: Stravin Gate Build Checklist
 
