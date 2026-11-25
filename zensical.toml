@@ -24,6 +24,10 @@ nav = [
     { "Review <-> Gate" = "interfaces/review-gate.md" },
     { "Run <-> Gate" = "interfaces/run-gate.md" },
     { "Review <-> Index" = "interfaces/review-index.md" },
+    { "External Webhooks" = "interfaces/external-webhooks.md" },
+  ] },
+  { "Architecture Decision Records" = [
+    { "ADR-0001: Transport, Events & Webhooks" = "adr/0001-platform-transport-events-webhooks.md" },
   ] },
   { "Operations & Tooling" = [
     { "Local Development" = "operations/local-dev.md" },

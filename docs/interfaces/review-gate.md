@@ -18,19 +18,22 @@ This specification defines the contract between **Stravin Review** (pull request
 sequenceDiagram
     actor Dev as Developer / Agent
     participant Review as Stravin Review
-    participant Gate as Stravin Gate
+    participant Gate as Stravin Gate (Future Temporal Seam)
+    participant NATS as NATS JetStream (STRAVIN_GATE / STRAVIN_REVIEW)
 
     Dev->>Review: Click "Add to Merge Queue" (single PR or stacked group)
     Review->>Review: Snapshot approvals, unresolved threads, head_oid, stack members
-    Review->>Gate: POST /v1/queues/{target_ref}/entries (pr_ids[], eligibility_snapshot, priority)
+    Review->>Gate: POST /v1/queues/entries (Idempotency-Key, items[], eligibility, priority)
     Gate->>Gate: Validate policy_version rules (approvals, draft=false, stack contiguous)
     alt Eligible
         Gate-->>Review: 201 Created (queue_entry_id, position, policy_version)
         loop Queue progress
-            Gate->>Review: POST /v1/webhooks/gate (gate.entry.updated: position, state, reason)
+            Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.queue.updated (Nats-Msg-Id, traceparent)
+            NATS-->>Review: Durable consumer delivery (review-gate-events)
             Review->>Review: Render queue badge & timeline event on PR(s)
         end
-        Gate->>Review: POST /v1/webhooks/gate (gate.entry.merged: merged_commit_oid)
+        Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.entry.merged (merged_commit_oid)
+        NATS-->>Review: Durable consumer delivery
         Review->>Review: Mark PR(s) merged & close branches
     else Ineligible
         Gate-->>Review: 422 Unprocessable Entity (unmet_requirements[])
@@ -40,9 +43,10 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
-- **Service-to-Service Auth:** TLS 1.3 mTLS + signed service JWT (`tenant_id`, `scopes: ["gate:enqueue", "gate:dequeue", "gate:read"]`, `exp <= 5m`).
+- **Cilium eBPF Transport & Network Policy:** Bidirectional HTTP/2 or gRPC calls and NATS JetStream traffic traverse **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus signed service JWTs (`tenant_id`, `scopes: ["gate:enqueue", "gate:dequeue", "gate:read"]`, `exp <= 5m`).
+- **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Every Review and Gate API handler and JetStream consumer MUST verify `tenant_id` in constant time in application code.
 - **Actor Authorization:** Every enqueue, dequeue, and priority-override call carries `actor_id`. Gate independently verifies whether `actor_id` is authorized for elevated priority lanes (e.g., `priority: "emergency"`) against its own policy config rather than blindly trusting Review.
-- **Snapshot Integrity:** Review's eligibility snapshot is bound to exact `(pr_id, head_oid, evaluated_at)` pairs. If a PR receives a new push or an approval is revoked while queued, Review immediately emits `review.pr.eligibility_changed` so Gate can evict the entry before merge.
+- **Snapshot Integrity:** Review's eligibility snapshot is bound to exact `(pr_id, head_oid, evaluated_at)` pairs. If a PR receives a new push or an approval is revoked while queued, Review immediately publishes `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` to `STRAVIN_REVIEW` so Gate can evict the entry before merge.
 
 ## 4. Synchronous Interfaces
 
@@ -121,10 +125,12 @@ Additional synchronous endpoints:
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Gate -> Review: Queue State & Outcome Webhooks
+### 5.1 Gate -> Review: Queue State & Outcome Events (`STRAVIN_GATE` JetStream)
 
-- `gate.entry.updated` — Fired on position changes, speculative check start, or pause (`state`: `queued` | `testing` | `merging` | `paused`).
-- `gate.entry.evicted` — Fired when an entry is removed due to merge conflict, required CI failure, approval revocation, or timeout:
+Published to stream `STRAVIN_GATE` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers (consumed by Review via durable pull consumer `review-gate-events`):
+
+- `stravin.gate.<tenant_id>.<repo_id>.queue.updated` (`event_type: "gate.entry.updated"`) — Fired on position changes, speculative check start, or pause (`state`: `queued` | `testing` | `merging` | `paused`).
+- `stravin.gate.<tenant_id>.<repo_id>.entry.evicted` (`event_type: "gate.entry.evicted"`) — Fired when an entry is removed due to merge conflict, required CI failure, approval revocation, or timeout:
 
 ```json
 {
@@ -148,11 +154,12 @@ Additional synchronous endpoints:
 }
 ```
 
-- `gate.entry.merged` — Fired after Core `AtomicRefCAS` succeeds, carrying `merged_commit_oid`, `target_ref`, `policy_version`, and per-PR final commit OIDs for stacked groups.
+- `stravin.gate.<tenant_id>.<repo_id>.entry.merged` (`event_type: "gate.entry.merged"`) — Fired after Core `AtomicRefCAS` succeeds, carrying `merged_commit_oid`, `target_ref`, `policy_version`, and per-PR final commit OIDs for stacked groups.
 
-### 5.2 Review -> Gate: Eligibility Invalidation Events
+### 5.2 Review -> Gate: Eligibility Invalidation Events (`STRAVIN_REVIEW` JetStream)
 
-- `review.pr.eligibility_changed` — Emitted whenever a queued PR is force-pushed, converted to draft, closed, receives a "changes requested" review, or loses a required approval. Gate evicts the affected `queue_entry_id` (and the entire `atomic_group` if stacked).
+- `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (`event_type: "review.pr.eligibility_changed"`) — Published to `STRAVIN_REVIEW` whenever a queued PR is force-pushed, converted to draft, closed, receives a "changes requested" review, or loses a required approval (and `stravin.review.<tenant_id>.<repo_id>.pr.approved` on approvals). Gate binds durable consumer `gate-review-eligibility` and evicts the affected `queue_entry_id` (and the entire `atomic_group` if stacked).
+- **Future Temporal Workflow Seam:** `POST /v1/queues/entries` and `DELETE /v1/queues/entries/{queue_entry_id}` are idempotent command boundaries, while `STRAVIN_REVIEW` invalidation events map cleanly to external workflow signals and `GET /v1/prs/{pr_id}/eligibility` maps cleanly to an idempotent activity. This lets **Stravin Gate** adopt **Temporal** internally later for its merge-queue state machine without changing Review's wire contract. **Stravin Review** stays Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -165,8 +172,8 @@ Additional synchronous endpoints:
 | Failure Scenario | Behavior & Degradation | Timeout / Retry Policy |
 | :--- | :--- | :--- |
 | **Gate API unavailable** | Review disables "Add to Merge Queue" with "Merge queue temporarily unavailable"; PR browsing, comments, and CI checks stay fully operational. | Sync timeout: 3 s; no automatic retry on `422`. |
-| **Review misses `gate.entry.merged` webhook** | Core's `core.ref.updated` webhook + periodic `GET /v1/queues/entries/{queue_entry_id}` reconciliation converge PR state to `merged`. | Reconcile any PR in `merging` state for > 60 s. |
-| **Review crashes before sending `review.pr.eligibility_changed`** | Before final `AtomicRefCAS`, Gate performs a fast `GET /v1/prs/{pr_id}/eligibility?head_oid=...` re-check if the snapshot is older than 5 minutes. | Re-check timeout: 1.5 s; fail-closed (evict) if Review reports invalid or unreachable past grace window. |
+| **Review misses `gate.entry.merged` event** | Durable `review-gate-events` JetStream consumer redelivers (with `STRAVIN_DLQ` capture on exhaustion); Core's `core.ref.updated` event + periodic `GET /v1/queues/entries/{queue_entry_id}` reconciliation converge PR state to `merged`. | Reconcile any PR in `merging` state for > 60 s. |
+| **Review crashes before publishing `review.pr.eligibility_changed`** | Before final `AtomicRefCAS`, Gate performs a fast `GET /v1/prs/{pr_id}/eligibility?head_oid=...` re-check if the snapshot is older than 5 minutes. | Re-check timeout: 1.5 s; fail-closed (evict) if Review reports invalid or unreachable past grace window. |
 | **Duplicate enqueue click** | Gate enforces idempotency on `Idempotency-Key` and rejects duplicate active entries for the same `pr_id` with `409 Conflict` returning the existing `queue_entry_id`. | Safe for client retries. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
@@ -174,19 +181,19 @@ Additional synchronous endpoints:
 ### Side A: Stravin Review Build Checklist
 
 - [ ] Build deterministic eligibility snapshot builder bound to `(pr_id, head_oid, evaluated_at)` and bottom-to-top stack ordering.
-- [ ] Emit `review.pr.eligibility_changed` whenever a queued PR's approvals, draft status, or `head_oid` changes.
-- [ ] Expose `GET /v1/prs/{pr_id}/eligibility` for Gate's pre-merge freshness check.
-- [ ] Render `gate.entry.updated`, `gate.entry.evicted`, and `gate.entry.merged` on all PRs in an atomic group.
+- [ ] Publish `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (with `Nats-Msg-Id` and `traceparent`) to `STRAVIN_REVIEW` whenever a queued PR's approvals, draft status, or `head_oid` changes.
+- [ ] Expose `GET /v1/prs/{pr_id}/eligibility` with app-level `tenant_id` check for Gate's pre-merge freshness check.
+- [ ] Bind durable JetStream consumer `review-gate-events` on `STRAVIN_GATE` and render `queue.updated`, `entry.evicted`, and `entry.merged` on all PRs in an atomic group.
 
 ### Side B: Stravin Gate Build Checklist
 
-- [ ] Implement `POST /v1/queues/entries`, `DELETE /v1/queues/entries/{id}`, `GET /v1/queues/entries/{id}`, and `POST /v1/policies/evaluate`.
+- [ ] Implement idempotent `POST /v1/queues/entries`, `DELETE /v1/queues/entries/{id}`, `GET /v1/queues/entries/{id}`, and `POST /v1/policies/evaluate` (Temporal command-seam ready) with constant-time `tenant_id` checks.
 - [ ] Enforce `atomic_group: true` all-or-nothing semantics for stacked PRs.
-- [ ] Re-verify eligibility snapshots older than 5 minutes before executing Core `AtomicRefCAS`.
-- [ ] Return structured `unmet_requirements[]` and `reason_code` values for clear PR timeline feedback.
+- [ ] Bind durable JetStream consumer `gate-review-eligibility` on `STRAVIN_REVIEW` and re-verify eligibility snapshots older than 5 minutes before executing Core `AtomicRefCAS`.
+- [ ] Publish queue outcomes to `STRAVIN_GATE` and return structured `unmet_requirements[]` and `reason_code` values for clear PR timeline feedback.
 
 ### Shared Contract-Test Fixtures
 
 - `fixtures/review-gate/enqueue-stacked-group.json` — Two-PR atomic stack enqueue request + `201 Created` response.
-- `fixtures/review-gate/eviction-reasons.json` — Payloads covering `MERGE_CONFLICT`, `REQUIRED_CHECK_FAILED`, and `APPROVAL_REVOKED`.
+- `fixtures/review-gate/eviction-reasons.json` — `STRAVIN_GATE` JetStream payloads (`Nats-Msg-Id`, `traceparent`) covering `MERGE_CONFLICT`, `REQUIRED_CHECK_FAILED`, and `APPROVAL_REVOKED`.
 - `fixtures/review-gate/policy-evaluate-422.json` — Ineligible PR dry-run response with unmet CODEOWNERS and unresolved-thread items.

@@ -17,12 +17,14 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 sequenceDiagram
     participant Node as Stravin Core (stravin-node)
     participant Hook as Stravin Core (stravin-hook)
+    participant NATS as NATS JetStream (STRAVIN_CORE)
     participant Index as Stravin Index (Ingestor)
     participant Edge as Stravin Core (stravin-edge)
 
     Node->>Node: Atomic push commit (RS + RH + MS)
     Note over Node,Hook: DynamoDB Streams INSERT on RH#s
-    Hook->>Index: POST /v1/webhooks/core (ref, oid, prev_oid, pack_id, traceparent)
+    Hook->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
+    NATS-->>Index: Durable pull consumer (index-core-ingest) or stream replay
     Index->>Index: Check if ref matches indexed set (default_branch / configured refs)
     alt Incremental Update (prev_oid already indexed)
         Index->>Node: gRPC IndexFeed.DiffCommitTrees(prev_oid, new_oid) [vNext]
@@ -38,8 +40,8 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
-- **Service-to-Service Auth:** Index authenticates to `stravin-edge` (Smart HTTP) or `stravin-node` (`IndexFeed` gRPC vNext) using TLS 1.3 mTLS and a tenant-scoped read-only service JWT (`scopes: ["git:read", "meta:read"]`).
-- **Tenant Isolation:** Index MUST partition all search shards, caches, and query filters by `tenant_id` (derived from the authenticated Core event/metadata). Index NEVER shares trigram postings or symbol tables across tenants, even if two tenants store identical `blob_oid` hashes.
+- **Cilium eBPF Transport & Service Auth:** Index communicates with `stravin-edge` (Smart HTTP), `stravin-node` (`IndexFeed` gRPC vNext), and NATS JetStream over **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus a tenant-scoped read-only service JWT (`scopes: ["git:read", "meta:read"]`, `exp <= 5m`).
+- **Mandatory App-Level Tenancy & Shard Isolation:** Cilium verifies workload identity, NOT `tenant_id`. Both Core's `IndexFeed` handler and Index's JetStream ingestor MUST verify `tenant_id` in constant time in application code. Index MUST partition all search shards, caches, and query filters by `tenant_id` and NEVER share trigram postings or symbol tables across tenants, even if two tenants store identical `blob_oid` hashes.
 - **No Raw S3/DynamoDB Coupling:** Index does NOT read Core's DynamoDB table or S3 pack bucket directly. Reading through Core's wire protocol or `IndexFeed` API ensures Core can freely evolve pack compaction, sharding, and KMS encryption without breaking Index.
 
 ## 4. Synchronous Interfaces
@@ -93,14 +95,14 @@ message BatchReadBlobsRequest {
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Core -> Index: Ref Update & Repo Lifecycle Events
+### 5.1 Core -> Index: Ref Update & Repo Lifecycle Events (`STRAVIN_CORE` JetStream)
 
-- **Implemented in Core v1.12.x:** `stravin-hook` delivers signed `push` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) with `{tenant_id, repo_id, ref, oid, pack_id, timestamp}`.
-- **Proposed Core Extension (vNext):**
-    - `core.ref.updated`: Adds `prev_oid`, `ulid`, `epoch`, `object_format`, and `default_branch` so Index can immediately decide whether to ingest a ref without a metadata round-trip.
-    - `core.repo.meta_updated`: Fired when `default_branch` changes so Index swaps its default search branch.
-    - `core.repo.deleted`: Tombstone event carrying `{tenant_id, repo_id, deleted_at, ulid}` requiring Index to purge all search shards and symbol graphs for the repository within its compliance SLA.
-- **Event Coalescing:** When a busy monorepo pushes 50 times/sec to `refs/heads/main`, Index coalesces queued events for the same `(tenant_id, repo_id, ref_name)` and indexes directly from its last committed watermark `indexed_oid` to the latest `head_oid`, skipping intermediate commits.
+- **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently delivers flat signed HTTP `push` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) with `{tenant_id, repo_id, ref, oid, pack_id, timestamp}`.
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes to stream `STRAVIN_CORE` (retained 7–14 days for replay) with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers:
+    - `stravin.core.<tenant_id>.<repo_id>.ref.updated`: Adds `prev_oid`, `ulid`, `epoch`, `object_format`, and `default_branch` so Index can immediately decide whether to ingest a ref without a metadata round-trip.
+    - `stravin.core.<tenant_id>.<repo_id>.repo.meta_updated`: Fired when `default_branch` changes so Index swaps its default search branch.
+    - `stravin.core.<tenant_id>.<repo_id>.repo.deleted`: Tombstone event carrying `{tenant_id, repo_id, deleted_at, ulid}` requiring Index to purge all search shards and symbol graphs for the repository within its compliance SLA.
+- **Stream Retention, Replay Backfill & Event Coalescing:** Index binds durable pull consumer `index-core-ingest` on `stravin.core.>`. After an Index crash, shard rebuild, or new language parser rollout, Index creates an ephemeral replay consumer starting at a historical `STRAVIN_CORE` timestamp or sequence number without putting extra load on Core's DynamoDB Streams. When a busy monorepo pushes 50 times/sec to `refs/heads/main`, Index coalesces queued events for the same `(tenant_id, repo_id, ref_name)` and indexes directly from its last committed watermark `indexed_oid` to the latest `head_oid`, skipping intermediate commits.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -112,9 +114,9 @@ message BatchReadBlobsRequest {
 
 | Failure Scenario | Behavior & Degradation | Timeout / Retry Policy |
 | :--- | :--- | :--- |
-| **Index ingestor falls behind or restarts** | Index serves slightly stale search results (reporting `indexed_commit_oid` to callers like Review) and catches up by coalescing to the latest `head_oid`. | Backfill reconciler scans `GetRepoMetadata` + `ListRefs` every 15 minutes for missed webhooks. |
+| **Index ingestor falls behind or restarts** | Index serves slightly stale search results (reporting `indexed_commit_oid` to callers like Review) and catches up from its durable `index-core-ingest` JetStream offset, coalescing to the latest `head_oid`. | JetStream `STRAVIN_CORE` retention (7–14 d) enables self-service replay; periodic `GetRepoMetadata` + `ListRefs` reconciler covers gaps older than stream retention. |
 | **`prev_oid` unknown to Index (force-push or missed events)** | Index falls back from incremental `DiffCommitTrees` to full tree walk (`ListTree` + `BatchReadBlobs`) or Smart HTTP clone for `new_oid`. | Full tree walk timeout: 60 s per batch; chunked resume via page token. |
-| **Core `stravin-ctrl` failover rewinds a ref** | Core emits a new `core.ref.updated` with the rewound `oid` and higher `epoch`. Index detects `epoch > watermark.epoch` and re-indexes to the rewound commit. | Watermark comparison always prioritizes higher `failover_epoch`, then newer `ulid`. |
+| **Core `stravin-ctrl` failover rewinds a ref** | Core emits a new `stravin.core.<tenant>.<repo>.ref.updated` with the rewound `oid` and higher `epoch`. Index detects `epoch > watermark.epoch` and re-indexes to the rewound commit. | Watermark comparison always prioritizes higher `failover_epoch`, then newer `ulid`. |
 | **Missed `core.repo.deleted` tombstone** | On `NOT_FOUND` (`404`) from Core during reconciliation, Index marks the repo pending-purge and deletes shards after a 24-hour grace check. | Prevents orphaned tenant data from lingering in search indexes. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
@@ -123,18 +125,18 @@ message BatchReadBlobsRequest {
 
 - [ ] Expose `default_branch` and `object_format` consistently in `META` (Implemented in Core v1.12.x).
 - [ ] Support partial clone/fetch blob-size filters over Smart HTTP Protocol v2 (Implemented via `git-upload-pack` in Core v1.12.x).
-- [ ] Implement `stravin.core.v1.IndexFeed` (`GetRepoMetadata`, `DiffCommitTrees`, `BatchReadBlobs`) on `stravin-node` (vNext).
-- [ ] Emit `core.repo.meta_updated` and `core.repo.deleted` lifecycle events via `stravin-hook` (vNext).
+- [ ] Implement `stravin.core.v1.IndexFeed` (`GetRepoMetadata`, `DiffCommitTrees`, `BatchReadBlobs`) on `stravin-node` with constant-time app-level `tenant_id` check (vNext).
+- [ ] Publish `ref.updated`, `repo.meta_updated`, and `repo.deleted` to `STRAVIN_CORE` JetStream from `stravin-hook` with `Nats-Msg-Id` and `traceparent` (vNext).
 
 ### Side B: Stravin Index Build Checklist
 
-- [ ] Build coalescing ingestor keyed by `(tenant_id, repo_id, ref_name)` with watermark tracking `(indexed_commit_oid, failover_epoch, ulid)`.
-- [ ] Enforce strict `tenant_id` isolation on every shard, cache entry, and query response.
+- [ ] Build coalescing JetStream pull ingestor (`index-core-ingest`) keyed by `(tenant_id, repo_id, ref_name)` with watermark tracking `(indexed_commit_oid, failover_epoch, ulid)` and replay backfill support.
+- [ ] Enforce strict app-level `tenant_id` isolation on every shard, cache entry, and query response.
 - [ ] Support both Smart HTTP fallback (for Core v1.12.x) and `IndexFeed` gRPC (for vNext) behind an internal `CoreSource` adapter.
 - [ ] Implement tombstone purge handler for `core.repo.deleted` and `404` reconciliation.
 
 ### Shared Contract-Test Fixtures
 
 - `fixtures/core-index/incremental-tree-delta.json` — Add, modify, delete, mode-change, and oversized-blob (>1 MiB) `TreeDelta` stream.
-- `fixtures/core-index/failover-rewind-sequence.json` — Event sequence where `failover_epoch` advances from `1` to `2` with a rewound `oid`.
-- `fixtures/core-index/repo-tombstone.json` — `core.repo.deleted` event payload + expected HMAC signature.
+- `fixtures/core-index/failover-rewind-sequence.json` — JetStream `STRAVIN_CORE` event sequence where `failover_epoch` advances from `1` to `2` with a rewound `oid`.
+- `fixtures/core-index/repo-tombstone.json` — `stravin.core.<tenant>.<repo>.repo.deleted` JetStream message and headers (`Nats-Msg-Id`, `traceparent`).

@@ -16,16 +16,18 @@ This specification defines the contract between **Stravin Run** (CI runners and 
 
 ```mermaid
 sequenceDiagram
-    participant Gate as Stravin Gate
+    participant Gate as Stravin Gate (Future Temporal Seam)
     participant Core as Stravin Core
-    participant Run as Stravin Run
+    participant Run as Stravin Run (Future Temporal Seam)
+    participant NATS as NATS JetStream (STRAVIN_RUN)
 
     Gate->>Core: ComputeMergeTree -> refs/stravin/gate/main/qe_01... (commit_oid, tree_oid)
-    Gate->>Run: POST /v1/gate-builds (queue_entry_id, ref, commit_oid, tree_oid, required_checks[], policy_version)
+    Gate->>Run: POST /v1/gate-builds (Idempotency-Key, queue_entry_id, commit_oid, tree_oid, required_checks[])
     Run-->>Gate: 202 Accepted (batch_run_id, check_runs[])
 
     alt All required checks pass
-        Run->>Gate: POST /v1/webhooks/run (run.gate_verdict.ready: PASSED, verdicts[])
+        Run->>NATS: Publish stravin.run.<tenant>.<repo>.gate_verdict.ready (Nats-Msg-Id, traceparent)
+        NATS-->>Gate: Durable consumer delivery (gate-run-verdicts)
         Gate->>Gate: Verify (tree_oid, commit_oid, policy_version) & advance merge
     else Earlier queue entry evicted (speculative chain invalidated)
         Gate->>Run: POST /v1/gate-builds/{batch_run_id}/cancel (reason: QUEUE_RESET)
@@ -37,8 +39,9 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
-- **Service-to-Service Auth:** TLS 1.3 mTLS + signed service JWT (`tenant_id`, `scopes: ["run:gate-build", "run:cancel"]` for Gate -> Run; `scopes: ["gate:verdict"]` for Run -> Gate).
-- **Tamper-Evident Verdict Attestation:** Every verdict payload from Run is signed with `X-Stravin-Signature-256` and carries `(tenant_id, repo_id, queue_entry_id, commit_oid, tree_oid, policy_version, check_name, conclusion)`. Gate rejects any verdict whose `tenant_id`, `commit_oid`, or `tree_oid` does not match its active speculative entry.
+- **Cilium eBPF Transport & Network Policy:** Bidirectional HTTP/2 or gRPC calls and NATS JetStream traffic traverse **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus signed service JWTs (`tenant_id`, `scopes: ["run:gate-build", "run:cancel"]` for Gate -> Run; scoped NATS publish/subscribe credentials on `STRAVIN_RUN`).
+- **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Both Gate and Run MUST verify `tenant_id` in constant time in application code on every HTTP request and NATS JetStream message.
+- **Tamper-Evident Verdict Attestation:** Every verdict event published by Run to `STRAVIN_RUN` carries `(tenant_id, repo_id, queue_entry_id, commit_oid, tree_oid, policy_version, check_name, conclusion)` (with optional detached attestation signature for high-assurance compliance policies). Gate rejects any verdict whose `tenant_id`, `commit_oid`, or `tree_oid` does not match its active speculative entry.
 - **No Unbounded Runner Waste:** Gate's fast-cancel API (`POST /v1/gate-builds/{batch_run_id}/cancel`) is high-priority and bypasses normal rate limits so evicted speculative batches stop burning runner CPU within seconds.
 
 ## 4. Synchronous Interfaces
@@ -105,10 +108,12 @@ Authorization: Bearer <service-jwt>
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Run -> Gate: Check Verdict & Batch Completion Webhooks
+### 5.1 Run -> Gate: Check Verdict & Batch Completion Events (`STRAVIN_RUN` JetStream)
 
-- `run.gate_check.completed` — Emitted per individual required check as soon as it finishes (enables **fail-fast eviction**: if `lint` fails in 15 s, Gate immediately evicts the entry and cancels the 20-minute `e2e-smoke` job).
-- `run.gate_verdict.ready` — Emitted when all `required_checks` have reached a terminal conclusion:
+Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_key>`, `Stravin-Event-Type`, `Stravin-Schema-Version: 1.0`, and W3C `traceparent` (consumed by Gate via durable pull consumer `gate-run-verdicts`):
+
+- `stravin.run.<tenant_id>.<repo_id>.gate_check.completed` (`event_type: "run.gate_check.completed"`) — Emitted per individual required check as soon as it finishes (enables **fail-fast eviction**: if `lint` fails in 15 s, Gate immediately evicts the entry and cancels the 20-minute `e2e-smoke` job).
+- `stravin.run.<tenant_id>.<repo_id>.gate_verdict.ready` (`event_type: "run.gate_verdict.ready"`) — Emitted when all `required_checks` have reached a terminal conclusion:
 
 ```json
 {
@@ -136,6 +141,8 @@ Authorization: Bearer <service-jwt>
 }
 ```
 
+- **Dual Temporal Workflow Seam:** Both **Stravin Run** and **Stravin Gate** sit at the platform's future **Temporal** boundary. Because `POST /v1/gate-builds` and `/cancel` are idempotent commands (with `Idempotency-Key`), `GET /v1/gate-builds/{batch_run_id}` provides reconciliation reads, and verdicts flow asynchronously over `STRAVIN_RUN` JetStream, **Run** (multi-step CI DAGs, fan-out/fan-in, timeouts) and **Gate** (speculative batch bisection, rebase/cancel/promote loops) can each independently adopt or upgrade Temporal behind their own service boundary without ever coupling workflow histories or changing this wire contract.
+
 ## 6. Shared Data Contracts & Identifiers
 
 - **Verdict Binding Tuple:** `(tenant_id, repo_id, tree_oid, commit_oid, policy_version)`.
@@ -149,27 +156,27 @@ Authorization: Bearer <service-jwt>
 | :--- | :--- | :--- |
 | **Check fails with `infra_error` (runner crash / Core 503)** | Run auto-retries once internally; if still `INFRA_ERROR`, Gate does NOT blame the PR — it requeues at the front of the queue (up to 2 retries) before pausing the queue and alerting operators. | Prevents innocent PRs from being evicted on transient CI outages. |
 | **Speculative batch exceeds `timeout_seconds`** | Gate sends `/cancel` (`reason: "QUEUE_TIMEOUT"`) and evicts the entry with `QUEUE_TIMEOUT`. | Default `timeout_seconds: 1800` (30 m). |
-| **Run webhook lost or delayed** | Gate polls `GET /v1/gate-builds/{batch_run_id}` every 30 s for any active batch without a recent event. | Ensures queue head never stalls silently. |
+| **JetStream verdict event delayed or dead-lettered** | Durable `gate-run-verdicts` consumer redelivers (with `STRAVIN_DLQ` advisory on exhaustion); Gate also polls `GET /v1/gate-builds/{batch_run_id}` every 30 s for any active batch without a recent event. | Ensures queue head never stalls silently. |
 | **Stale verdict arrives after queue reset** | Gate checks `(queue_entry_id, commit_oid, policy_version)` and discards verdicts for superseded `commit_oid`s. | Idempotent and safe against out-of-order delivery. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
 
 ### Side A: Stravin Run Build Checklist
 
-- [ ] Implement `POST /v1/gate-builds`, `POST /v1/gate-builds/{id}/cancel`, and `GET /v1/gate-builds/{id}`.
-- [ ] Emit `run.gate_check.completed` immediately on individual failures to support Gate fail-fast eviction.
+- [ ] Implement idempotent `POST /v1/gate-builds`, `POST /v1/gate-builds/{id}/cancel`, and `GET /v1/gate-builds/{id}` (Temporal workflow-seam ready) with app-level `tenant_id` check.
+- [ ] Publish `stravin.run.<tenant_id>.<repo_id>.gate_check.completed` and `gate_verdict.ready` to `STRAVIN_RUN` JetStream with `Nats-Msg-Id` and `traceparent` immediately on individual failures for fail-fast eviction.
 - [ ] Support `tree_oid` verdict reuse strictly scoped to `(tenant_id, repo_id, tree_oid, check_name)` and gated by `allow_tree_oid_reuse`.
 - [ ] Distinguish `infra_error` from `failure` in conclusions.
 
 ### Side B: Stravin Gate Build Checklist
 
-- [ ] Bind every speculative build request and verdict verification to `(tree_oid, commit_oid, policy_version)`.
-- [ ] Call `/cancel` immediately whenever an entry is evicted or a speculative chain resets.
+- [ ] Bind every speculative build request and verdict verification to `(tree_oid, commit_oid, policy_version)` with deterministic `Idempotency-Key`s (Temporal activity-safe).
+- [ ] Bind durable JetStream consumer `gate-run-verdicts` on `STRAVIN_RUN` and call `/cancel` immediately whenever an entry is evicted or a speculative chain resets.
 - [ ] Poll `GET /v1/gate-builds/{batch_run_id}` as a staleness backstop for active queue entries.
 - [ ] Requeue (rather than evict) on `INFRA_ERROR` up to the configured retry budget.
 
 ### Shared Contract-Test Fixtures
 
-- `fixtures/run-gate/speculative-build-pass.json` — Request, `202 Accepted`, and `run.gate_verdict.ready` (`PASSED`, including one `reused_from_tree_oid: true` check).
-- `fixtures/run-gate/fail-fast-cancel.json` — Early `run.gate_check.completed` (`failure`) triggering `POST /v1/gate-builds/{id}/cancel`.
+- `fixtures/run-gate/speculative-build-pass.json` — Request, `202 Accepted`, and `STRAVIN_RUN` JetStream `gate_verdict.ready` (`PASSED`, including one `reused_from_tree_oid: true` check).
+- `fixtures/run-gate/fail-fast-cancel.json` — Early `gate_check.completed` (`failure`) JetStream message triggering `POST /v1/gate-builds/{id}/cancel`.
 - `fixtures/run-gate/infra-error-requeue.json` — `INFRA_ERROR` verdict fixture verifying non-blame requeue behavior.

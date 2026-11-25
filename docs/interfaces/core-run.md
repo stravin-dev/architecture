@@ -17,16 +17,18 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 sequenceDiagram
     participant Node as Stravin Core (stravin-node)
     participant Hook as Stravin Core (stravin-hook)
-    participant Run as Stravin Run (Scheduler)
+    participant NATS as NATS JetStream (STRAVIN_CORE)
+    participant Run as Stravin Run (Scheduler / Future Temporal Seam)
     participant Runner as Stravin Run (Ephemeral Runner)
     participant Edge as Stravin Core (stravin-edge)
     participant Cache as Valkey + S3 Pack Cache / Bundle
 
     Node->>Node: Commit push to DynamoDB (RS + RH + MS)
     Note over Node,Hook: DynamoDB Streams INSERT on RH#s
-    Hook->>Run: POST /v1/webhooks/core (X-Stravin-Event: push, traceparent)
+    Hook->>NATS: Publish stravin.core.<tenant>.<repo>.ref.updated (Nats-Msg-Id, traceparent) [vNext]
+    NATS-->>Run: Durable consumer delivery (run-core-triggers)
     Run->>Run: Match trigger rules (ref glob, tag, workflow YAML)
-    Run->>Edge: Request short-lived git:read token [vNext]
+    Run->>Edge: Request short-lived git:read token (Cilium eBPF mTLS) [vNext]
     Edge-->>Run: Scoped token (TTL 15m, repo-bound)
     Run->>Runner: Boot ephemeral sandbox with (repo_url, commit_oid, token)
 
@@ -42,7 +44,7 @@ sequenceDiagram
         Cache-->>Edge: Cached pack response
         Edge-->>Runner: Stream cached pack (0 stravin-node load)
     else Pack Cache Miss
-        Edge->>Node: gRPC GitWire/Stream (git-upload-pack)
+        Edge->>Node: gRPC GitWire/Stream (git-upload-pack, Cilium eBPF)
         Node-->>Edge: Pack stream
         Edge->>Cache: Async Set (TTL 5m)
         Edge-->>Runner: Stream pack
@@ -51,6 +53,8 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
+- **Cilium eBPF Transport & Network Policy:** Run's control plane communicates with `stravin-edge` and NATS JetStream over **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists. Ephemeral runner sandboxes are isolated by a strict egress `CiliumNetworkPolicy` permitting only `stravin-edge` (and presigned S3 bundle URLs), never `stravin-node` or internal NATS/DB ports.
+- **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. `stravin-edge` (`edge.AuthorizeTenant`) and Run's JetStream consumers MUST verify `tenant_id` in constant time in application code on every request and event.
 - **Runner Clone Auth (Implemented in Core v1.12.x):** Runners clone over Smart HTTP (`Authorization: Bearer <token>`) or SSH against `stravin-edge`. `edge.AuthorizeTenant` enforces strict tenant isolation.
 - **Short-Lived Scoped Git Tokens (Proposed Core Extension vNext):** Before booting a runner, Run's control plane mints a read-only token scoped to `(tenant_id, repo_id, commit_oid|ref_globs, scope="git:read", exp=now+15m)`. Write tokens (`scope="git:write"`) are issued only for explicitly configured release/tag workflows and are never granted to untrusted PR runs.
 - **Zero Direct Storage Access:** Ephemeral runners NEVER receive AWS IAM credentials for Core's S3 pack bucket or DynamoDB table. All object access flows through `stravin-edge` or time-limited presigned S3 URLs for `bundles/{tenant_id}/{repo_id}/latest.bundle`.
@@ -104,17 +108,18 @@ Response (`200 OK`):
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Core -> Run: Push & Tag Trigger Webhook
+### 5.1 Core -> Run: Push & Tag Trigger Events (`STRAVIN_CORE` JetStream)
 
-- **Implemented in Core v1.12.x:** `stravin-hook` dispatches signed POST requests (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) for every `RH#s` INSERT matching the repo's configured `ref_glob` (e.g., `refs/heads/*`, `refs/tags/*`).
-- **Proposed Core Extension (vNext):** Uses the Standard Async Event Envelope (`core.ref.updated`) with `data.prev_oid`, `data.ulid`, `data.object_format`, and `data.deleted` (true when `oid` is zero OID) so Run can distinguish tag creation, branch deletion (cancelling superseded runs), and force-pushes without an extra round-trip.
+- **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently dispatches flat signed HTTP `POST` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) for every `RH#s` INSERT matching the repo's configured `ref_glob` (e.g., `refs/heads/*`, `refs/tags/*`).
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes Standard Async Event Envelopes to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` in NATS headers. The payload includes `data.prev_oid`, `data.ulid`, `data.object_format`, and `data.deleted` (true when `oid` is zero OID) so Run can distinguish tag creation, branch deletion (cancelling superseded runs), and force-pushes without an extra round-trip.
+- **Durable Consumer & Future Temporal Seam:** Run binds durable pull consumer `run-core-triggers` on `stravin.core.*.*.ref.updated`. Trigger ingestion maps each unique `idempotency_key` to a single idempotent pipeline start command (future **Temporal** workflow start with `WorkflowID = <tenant_id>:<repo_id>:<commit_oid>:<workflow>`), keeping Core completely decoupled from Run's internal orchestration engine.
 - **Workflow File Fetch:** Run fetches `.stravin/workflows/*.yaml` at the exact `commit_oid` (via `git archive`/shallow fetch today, or `GitData.StreamBlob` in vNext) before scheduling jobs.
 
 ## 6. Shared Data Contracts & Identifiers
 
 - **Build Pinning Tuple:** `(tenant_id, repo_id, commit_oid, ref_name)` — every runner checkout is pinned to `commit_oid` and verified against `object_format` (`sha1` vs. `sha256`).
 - **Cache-Friendly Fetch Profile:** Run standardizes its Git client flags (`-c protocol.version=2 -c transfer.bundleURI=true -c fetch.negotiationAlgorithm=noop` for shallow clones) so matrix jobs maximize `stravin-edge` pack-cache hit ratio.
-- **Telemetry Correlation:** Run injects `traceparent` from the triggering webhook into the runner checkout's HTTP `traceparent` header so Core traces link push -> webhook -> runner clone.
+- **Telemetry Correlation:** Run extracts `traceparent` from the triggering NATS JetStream header and injects it into the runner checkout's HTTP `traceparent` header so Core traces link push -> JetStream -> runner clone.
 
 ## 7. Failure Modes, Timeouts & Idempotency
 
@@ -123,26 +128,26 @@ Response (`200 OK`):
 | **Valkey or S3 pack cache unavailable** | `TieredPackCache` logs a warning and transparently falls back to `stravin-node` (`git-upload-pack`). Runners see higher latency but zero errors. | Transparent in `stravin-edge`. |
 | **`stravin-edge` returns `429` or `503` during matrix burst** | Runner retries `git fetch` with capped exponential backoff + jitter (initial `500 ms`, max `15 s`, max 4 attempts) before failing checkout as `INFRA_ERROR` (not test failure). | Checkout timeout: 120 s (configurable per repo size). |
 | **Token expires mid-long-clone** | Runner requests a refreshed token from Run control plane (if job still active) and retries fetch. | Token TTL default 15 m; refresh threshold 2 m before expiry. |
-| **Duplicate push webhook from `stravin-hook` retry** | Run deduplicates trigger ingestion on `idempotency_key` (`tenant_id:repo_id:ref:ulid`), preventing duplicate pipeline spawns. | Idempotency window >= 24 hours. |
+| **Duplicate push event from JetStream redelivery** | JetStream deduplicates `Nats-Msg-Id` at publish time, and Run deduplicates trigger ingestion on `idempotency_key` (`tenant_id:repo_id:ref:ulid`), preventing duplicate pipeline/workflow spawns. | Idempotency window >= 24 hours; exhausted messages route to `STRAVIN_DLQ`. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
 
 ### Side A: Stravin Core Build Checklist
 
 - [ ] Maintain Protocol v2 `TieredPackCache` (Valkey + S3 spillover) and `PackCacheCoordinator` singleflight (Implemented in Core v1.12.x).
-- [ ] Add `POST /internal/v1/tokens/git` short-lived scoped token minting on `stravin-edge` (vNext).
+- [ ] Add `POST /internal/v1/tokens/git` short-lived scoped token minting on `stravin-edge` with app-level `tenant_id` check (vNext).
 - [ ] Wire `bundle-uri` capability advertisement and presigned URL generation for `s3.BundleKey` (vNext).
-- [ ] Enrich `stravin-hook` push payload with `prev_oid`, `ulid`, and `event_id` (vNext).
+- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to NATS JetStream from `stravin-hook` with `Nats-Msg-Id`, `prev_oid`, `ulid`, and `traceparent` (vNext).
 
 ### Side B: Stravin Run Build Checklist
 
 - [ ] Configure all runners with `protocol.version=2`, exact `commit_oid` fetches, and `traceparent` propagation.
-- [ ] Deduplicate incoming `stravin-hook` webhooks by `idempotency_key` (or `(tenant_id, repo_id, ref, oid, timestamp)` for Core v1.12.x).
+- [ ] Bind durable JetStream consumer `run-core-triggers` on `STRAVIN_CORE` and deduplicate triggers by `idempotency_key` (idempotent workflow-start boundary ready for Temporal).
 - [ ] Classify `429`/`5xx` checkout failures as retryable `INFRA_ERROR`, distinct from user build failures.
-- [ ] Never pass AWS storage credentials into runner sandboxes; use only scoped HTTP Git tokens.
+- [ ] Never pass AWS storage credentials into runner sandboxes; use only scoped HTTP Git tokens and enforce strict runner egress `CiliumNetworkPolicy`.
 
 ### Shared Contract-Test Fixtures
 
 - `fixtures/core-run/v2-cacheable-fetch.pkt` — Raw Protocol v2 `command=fetch` pkt-line request verified against `edge.IsCacheableV2FullCloneFetch`.
-- `fixtures/core-run/webhook-tag-and-branch.json` — Branch push, tag push, and branch deletion payloads for trigger matching.
+- `fixtures/core-run/nats-tag-and-branch.json` — NATS JetStream `stravin.core.<tenant>.<repo>.ref.updated` messages for branch push, tag push, and branch deletion trigger matching.
 - `fixtures/core-run/scoped-token-response.json` — Token mint request/response schema and expiry validation fixture.
