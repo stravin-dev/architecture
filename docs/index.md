@@ -65,17 +65,22 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 
 ## Product-Stack Interfaces
 
-Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, and **Stravin Gate**:
+Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, and **Stravin Webhooks** (`stravin-webhooks`), backed by **Cilium (eBPF)** transport and **NATS JetStream** internal events:
 
-- [Product-Stack Interface Overview & Matrix](interfaces/index.md) — System-wide topology, intersection matrix, shared canonical identifiers, auth/tenancy rules, standard async event envelope, and versioning conventions.
-- [Core <-> Review](interfaces/core-review.md) — Git Smart HTTP/SSH, proposed read-only Git Data/Diff gRPC API, PR ref namespaces, `stravin-hook` push events, and Tier 1 Wasm hook rejections.
-- [Core <-> Run](interfaces/core-run.md) — Ephemeral runner clone/fetch leveraging Valkey+S3 pack cache and `bundle-uri`, scoped Git tokens, and push/tag trigger webhooks.
-- [Core <-> Index](interfaces/core-index.md) — Incremental indexing from `stravin-hook` ref events, tree/blob read path, `default_branch` and `object_format` metadata, backfill, and repository tombstones.
-- [Core <-> Gate](interfaces/core-gate.md) — Protected-ref enforcement via synchronous `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, speculative refs (`refs/stravin/gate/*`), and `failover_epoch` fencing.
-- [Review <-> Run](interfaces/review-run.md) — Check suite/run lifecycle, inline annotations, live log streaming URLs, manual re-run/cancel triggers, and stacked-diff check inheritance.
-- [Review <-> Gate](interfaces/review-gate.md) — PR approval and policy eligibility snapshots, enqueue/dequeue/priority API, queue feedback to PR timelines, and atomic stacked-diff merge groups.
-- [Run <-> Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, verdicts bound to `(tree_oid, commit_oid, policy_version)`, and fast cancellation on queue eviction or reset.
-- [Review <-> Index](interfaces/review-index.md) — PR diff code intelligence (hover, go-to-definition, find-references, cross-repo callers) with RBAC filtering and graceful lag fallback.
+- [Product-Stack Interface Overview & Matrix](interfaces/index.md) — System-wide topology, intersection matrix, shared canonical identifiers, Cilium + app-level tenancy rules, NATS JetStream event envelope, Temporal seam, and versioning conventions.
+- [Core <-> Review](interfaces/core-review.md) — Git Smart HTTP/SSH, proposed read-only Git Data/Diff gRPC API, PR ref namespaces, `stravin.core.*.*.ref.updated` JetStream events, and Tier 1 Wasm hook rejections.
+- [Core <-> Run](interfaces/core-run.md) — Ephemeral runner clone/fetch leveraging Valkey+S3 pack cache and `bundle-uri`, scoped Git tokens, push/tag JetStream triggers, and the Run Temporal seam.
+- [Core <-> Index](interfaces/core-index.md) — Incremental indexing and replay backfill from `STRAVIN_CORE` JetStream events, tree/blob read path, `default_branch` and `object_format` metadata, and repository tombstones.
+- [Core <-> Gate](interfaces/core-gate.md) — Protected-ref enforcement via synchronous `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, speculative refs (`refs/stravin/gate/*`), `failover_epoch` fencing, and the Gate Temporal seam.
+- [Review <-> Run](interfaces/review-run.md) — Check suite/run lifecycle over NATS JetStream, inline annotations, live log streaming URLs, idempotent re-run/cancel commands, stacked-diff check inheritance, and the Run Temporal seam.
+- [Review <-> Gate](interfaces/review-gate.md) — PR approval and policy eligibility snapshots, idempotent enqueue/dequeue/priority API, JetStream queue feedback, atomic stacked-diff merge groups, and the Gate Temporal seam.
+- [Run <-> Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version)`, fast cancellation on queue eviction/reset, and the dual Temporal workflow seam.
+- [Review <-> Index](interfaces/review-index.md) — PR diff code intelligence (hover, go-to-definition, find-references, cross-repo callers) over Cilium mTLS with RBAC filtering and graceful lag fallback.
+- [External Webhooks](interfaces/external-webhooks.md) — Dedicated `stravin-webhooks` service consuming internal NATS JetStream streams for outbound customer HTTP delivery, KMS HMAC-SHA256 signing, SSRF isolation, and DLQ replay.
+
+## Architecture Decision Records
+
+- [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflow Seam](adr/0001-platform-transport-events-webhooks.md) — Adopts Cilium (eBPF) sidecarless mTLS, NATS JetStream for internal async events, a dedicated `stravin-webhooks` service for outbound customer delivery, and an idempotent Temporal workflow seam behind Run and Gate.
 
 ## Operations & Tooling
 

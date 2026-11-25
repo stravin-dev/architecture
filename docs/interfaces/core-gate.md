@@ -40,7 +40,9 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
-- **Gate Merge Principal:** Gate authenticates to `stravin-edge` / `stravin-node` with a dedicated per-tenant service identity `actor_id = "svc:stravin-gate"` over TLS 1.3 mTLS + short-lived scoped token (`scopes: ["git:read", "git:write:gate-refs", "git:write:protected"]`).
+- **Cilium eBPF Transport & Network Policy:** Gate communicates with `stravin-edge`, `stravin-node` (`GateOps`), `stravin-ctrl`, and NATS JetStream over **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally).
+- **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Every `GateOps` RPC, `stravin-ctrl` query, and Gate JetStream consumer MUST verify `tenant_id` in constant time in application code.
+- **Gate Merge Principal:** Gate authenticates to `stravin-edge` / `stravin-node` with a dedicated per-tenant service identity `actor_id = "svc:stravin-gate"` and short-lived scoped token (`scopes: ["git:read", "git:write:gate-refs", "git:write:protected"]`, `exp <= 5m`).
 - **Hermetic Wasm Boundary (Implemented in Core v1.12.x):** Gate compiles branch-protection rules (protected ref globs, allowed pusher `actor_id`s, linear-history / signed-commit / path-restriction checks) into a pure WebAssembly module uploaded via `admin.Service.ConfigureWasmHook`. Because `stravin-node` executes Tier 1 Wasm with **zero network and zero disk access**, Core enforces Gate's protection policy at line speed (~1–10 ms) without ever making a synchronous network RPC back to Gate during `git push`.
 - **Fail-Closed Guarantee:** Gate MUST configure its protection Wasm hooks with `fail_mode: "closed"` (`ddb.FailModeClosed`) so a Wasm timeout (`50 ms` default / `250 ms` max) or memory cap (`16–64 MB`) rejects the push rather than bypassing branch protection.
 - **Control-Plane Fencing (`stravin-ctrl`):** Gate queries `stravin-ctrl` using Bearer `AdminToken` (read-only `/v1/lease/status`) to observe regional `failover_epoch` and `write_state` (`ACTIVE` | `DRAINING` | `READ_ONLY`).
@@ -114,10 +116,11 @@ message RefTransition {
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Core -> Gate: Protected-Ref Drift Notifications
+### 5.1 Core -> Gate: Protected-Ref Drift Notifications (`STRAVIN_CORE` JetStream)
 
-- **Implemented in Core v1.12.x:** `stravin-hook` emits signed `push` webhooks for protected branches (`refs/heads/main`, etc.).
-- **Why Gate Subscribes:** If an authorized bypass push (e.g., break-glass admin push) or a `stravin-ctrl` failover rewind mutates `refs/heads/main` out-of-band, Gate receives `core.ref.updated` with `(ref, oid, prev_oid, epoch)`, immediately invalidates in-flight speculative queue entries built on the stale base, and rebuilds the speculative chain from the new `oid`.
+- **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently emits flat signed HTTP `push` webhooks for protected branches (`refs/heads/main`, etc.).
+- **Proposed Core Extension (vNext — NATS JetStream):** `stravin-hook` publishes to `STRAVIN_CORE` on `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers. Gate binds durable pull consumer `gate-core-drift` on `stravin.core.*.*.ref.updated`.
+- **Why Gate Subscribes & Future Temporal Seam:** If an authorized bypass push (e.g., break-glass admin push) or a `stravin-ctrl` failover rewind mutates `refs/heads/main` out-of-band, Gate receives `core.ref.updated` with `(ref, oid, prev_oid, epoch)`, immediately invalidates in-flight speculative queue entries built on the stale base, and rebuilds the speculative chain from the new `oid`. Because `ComputeMergeTree` and `AtomicRefCAS` are strictly idempotent (keyed by `idempotency_key` and fenced by `old_oid` + `expected_epoch`) and drift arrives as JetStream events, Gate can later adopt **Temporal** internally to drive its speculative rebase/cancel/promote state machine (signaling the queue workflow on `core.ref.updated` and calling `GateOps` as idempotent activities) without changing Core's wire contract. Core itself remains Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -140,12 +143,13 @@ message RefTransition {
 
 - [ ] Maintain dual-hash `HookHostABI` v2, `fail_mode: closed`, and `stravin-ctrl` lease/epoch endpoints (Implemented in Core v1.12.x).
 - [ ] Expose HTTP/gRPC Admin API wrapping `internal/admin.Service.ConfigureWasmHook` for automated Gate policy deployment (vNext).
-- [ ] Implement `stravin.core.v1.GateOps` (`ComputeMergeTree`, `AtomicRefCAS` with `expected_epoch`) on `stravin-node` (vNext).
+- [ ] Implement idempotent `stravin.core.v1.GateOps` (`ComputeMergeTree`, `AtomicRefCAS` with `expected_epoch`, `idempotency_key`, and app-level `tenant_id` check) on `stravin-node` (vNext).
+- [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to `STRAVIN_CORE` JetStream from `stravin-hook` (vNext).
 
 ### Side B: Stravin Gate Build Checklist
 
 - [ ] Compile branch-protection rules into deterministic, zero-I/O Wasm modules targeting `"stravin"` `HookHostABI` v2 (`*_v2` exports for SHA-1 and SHA-256).
-- [ ] Fence all merges with `expected_epoch` and subscribe to `stravin-hook` protected-ref webhooks to detect out-of-band drift.
+- [ ] Fence all merges with `expected_epoch`, pass deterministic `idempotency_key`s (Temporal activity-safe), and bind durable JetStream consumer `gate-core-drift` on `STRAVIN_CORE`.
 - [ ] Isolate all speculative refs under `refs/stravin/gate/*` and garbage-collect them on merge or eviction.
 - [ ] Enforce `len(updates) <= 45` per atomic transaction.
 

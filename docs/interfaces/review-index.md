@@ -36,9 +36,9 @@ sequenceDiagram
 
 ## 3. Auth, Tenancy & Trust Boundary
 
-- **Service-to-Service Auth:** TLS 1.3 mTLS + signed service JWT (`aud: "stravin-index"`, `tenant_id`, `actor_id`, `readable_repo_ids` or RBAC policy token, `exp <= 5m`).
+- **Cilium eBPF Transport & Service Auth:** `CodeIntel` gRPC calls and NATS JetStream hints traverse **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus signed service JWTs (`aud: "stravin-index"`, `tenant_id`, `actor_id`, `readable_repo_ids` or RBAC policy token, `exp <= 5m`).
+- **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Every `CodeIntel` RPC carries `tenant_id` in both gRPC metadata and the request body; Index verifies `tenant_id` in constant time in application code and rejects mismatches with `PERMISSION_DENIED`.
 - **Cross-Repo Permission Filtering:** For `FindReferences` and `FindCrossRepoCallers`, Index MUST filter every returned location against the caller's `tenant_id` AND the end-user `actor_id`'s repository read permissions. A reviewer who cannot read `acme/secret-service` MUST NOT see its callers, filenames, or match counts when reviewing `acme/shared-lib`.
-- **Zero Cross-Tenant Leakage:** Every query carries `tenant_id` in both gRPC metadata and the request body; Index rejects mismatches with `PERMISSION_DENIED`.
 
 ## 4. Synchronous Interfaces
 
@@ -112,12 +112,12 @@ message LocationsResponse {
 
 ## 5. Asynchronous Events & Streams
 
-### 5.1 Review -> Index: Priority On-Demand Indexing Hint (Optional)
+### 5.1 Review -> Index: Priority On-Demand Indexing Hint (`STRAVIN_REVIEW` JetStream, Optional)
 
-By default, Stravin Index indexes `default_branch` and configured long-lived branches driven by Core's `stravin-hook` events (see [Core <-> Index](core-index.md)). To give active PRs exact symbol navigation without indexing every ephemeral branch in the org:
+By default, Stravin Index indexes `default_branch` and configured long-lived branches driven by Core's `STRAVIN_CORE` JetStream events (see [Core <-> Index](core-index.md)). To give active PRs exact symbol navigation without indexing every ephemeral branch in the org:
 
-- Review emits `review.pr.opened_or_updated` (Standard Async Event Envelope) carrying `{tenant_id, repo_id, pr_id, head_oid, base_oid, changed_paths[]}` as a **best-effort priority hint**.
-- Index may compute an overlay symbol delta for `changed_paths[]` on `head_oid` (TTL 24 hours). If Index drops or lags on the hint, `CodeIntel` falls back cleanly to `fallback_commit_oid` (`base_oid`) or `INDEX_FRESHNESS_UNINDEXED`.
+- Review publishes `stravin.review.<tenant_id>.<repo_id>.pr.opened_or_updated` (`event_type: "review.pr.opened_or_updated"`, `Nats-Msg-Id`, `traceparent`) to `STRAVIN_REVIEW` carrying `{tenant_id, repo_id, pr_id, head_oid, base_oid, changed_paths[]}` as a **best-effort priority hint**.
+- Index binds durable consumer `index-review-hints` on `stravin.review.*.*.pr.opened_or_updated` and may compute an overlay symbol delta for `changed_paths[]` on `head_oid` (TTL 24 hours). If Index drops or lags on the hint, `CodeIntel` falls back cleanly to `fallback_commit_oid` (`base_oid`) or `INDEX_FRESHNESS_UNINDEXED`. Both Review and Index stay Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -141,7 +141,7 @@ By default, Stravin Index indexes `default_branch` and configured long-lived bra
 - [ ] Convert UI cursor positions to 0-based `(line, utf8_byte_col)` and always pass both `commit_oid` and `fallback_commit_oid` (`base_oid`).
 - [ ] Enforce strict client deadlines (`250 ms` hover/def, `800 ms` refs) with circuit-breaking so Index outages never slow down PR rendering.
 - [ ] Handle `INDEX_FRESHNESS_STALE_FALLBACK` and `INDEX_FRESHNESS_UNINDEXED` gracefully in the UI.
-- [ ] Emit best-effort `review.pr.opened_or_updated` hints with `changed_paths[]`.
+- [ ] Publish best-effort `stravin.review.<tenant_id>.<repo_id>.pr.opened_or_updated` hints to `STRAVIN_REVIEW` with `changed_paths[]`, `Nats-Msg-Id`, and `traceparent`.
 
 ### Side B: Stravin Index Build Checklist
 
