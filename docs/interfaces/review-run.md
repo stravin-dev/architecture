@@ -2,7 +2,7 @@
 
 This specification defines the contract between **Stravin Review** (pull requests, stacked diffs, inline review) and **Stravin Run** (ephemeral CI runners and pipelines).
 
-> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Review nor Stravin Run is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification.
+> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Review nor Stravin Run is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification. External runner execution seams, pool isolation, and OIDC App authentication follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md).
 
 ## 1. Boundary & Ownership
 
@@ -10,7 +10,7 @@ This specification defines the contract between **Stravin Review** (pull request
 | :--- | :--- | :--- |
 | **PR metadata, stacked-diff parent/child chain, UI check-summary display, user re-run/cancel clicks** | **Stravin Review** | PR database, diff viewer layout, comment threading, user notification routing |
 | **Check suites, check runs, step state, inline diagnostic annotations, live build logs, artifacts** | **Stravin Run** | Runner scheduling, sandbox lifecycle, log object storage, cache backend |
-| **Stacked-diff check inheritance** | **Stravin Review** (declares stack) / **Stravin Run** (executes or inherits by `tree_oid`) | Run decides whether a child PR can reuse a parent's cached result for unchanged targets |
+| **Stacked-diff check inheritance** | **Stravin Review** (declares stack) / **Stravin Run** (executes or inherits by partitioned `tree_oid`) | Run partitions `tree_oid` reuse by `(tenant_id, repo_id, tree_oid, check_name, app_id, runner_pool, policy_version)` so `untrusted-pr` pools or lower-trust external apps never satisfy protected checks |
 
 ## 2. Interaction Flow
 
@@ -48,7 +48,10 @@ sequenceDiagram
 - **Cilium eBPF Transport & Network Policy:** Bidirectional HTTP/2 or gRPC calls and NATS JetStream traffic traverse **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus signed service JWTs (`aud: "stravin-run"` or `"stravin-review"`, `tenant_id`, `scopes`, `exp <= 5m`).
 - **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Every Review and Run API handler and JetStream consumer MUST verify `tenant_id` in constant time in application code.
 - **Actor Attribution:** User-triggered actions (`rerun`, `cancel`) MUST pass the authenticated end-user `actor_id` and `actor_roles` so Run enforces repository RBAC (e.g., preventing read-only viewers from triggering privileged runners) and records audit trails.
-- **Live Log Streaming URLs:** Run returns short-lived, tenant-scoped signed WebSocket/SSE URLs (`log_stream_url`, TTL 15 minutes) that the Review browser client connects to directly, keeping heavy log traffic off Review's API servers.
+- **Live Log Streaming URLs:** Run mints short-lived, tenant-scoped signed WebSocket/SSE URLs (`log_stream_url`, TTL 15 minutes) that the Review browser client connects to directly, keeping heavy log traffic off Review's API servers. Run MUST **never** accept runner-supplied `log_stream_url` endpoints.
+- **External Runner Seam, Pool Isolation & Callback Hardening ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):**
+    - **Phase 1 (Primary — Job-Lease Pull Seam):** Run's Temporal DAG dispatches jobs to isolated `runner_pool`s (`untrusted-pr` vs. `protected`/`gate`) enforced by pool-scoped OIDC App claims so untrusted PR workloads never lease protected or Gate jobs. Every external job-lease token is bound to `(tenant_id, repo_id, runner_pool, job_id, attempt_id, runner_instance_id)` and revoked server-side on cancel or `INFRA_ERROR` retry.
+    - **Phase 2 (Secondary / Degraded Tier — External Checks API):** External CI engines authenticate via OIDC Apps and post check updates through Run's `app_id`-bound public Checks API (no unified step-level `< 200 ms` cancel or mixed hosted+external DAGs). External `details_url` values MUST be restricted to `https://` on the registered app's origin, and Run enforces the `50/batch` and `1,000/run` annotation caps plus constant-time `tenant_id` verification at the external ingress edge before publishing to `STRAVIN_RUN`.
 - **Event Integrity:** All `Run -> Review` async lifecycle events publish to `STRAVIN_RUN` in NATS JetStream with `Nats-Msg-Id` deduplication and W3C `traceparent` headers. (Outbound customer webhooks for check events are delivered separately by `stravin-webhooks`.)
 
 ## 4. Synchronous Interfaces
@@ -142,6 +145,8 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
     "pr_id": "pr_01JDF8Z7Q2K9M4N6P8R0T2V4W6",
     "check_suite_id": "cs_01JDF9...",
     "run_id": "run_01JDF9A1B2C3D4E5F6G7H8J9K0",
+    "app_id": "stravin-run",
+    "runner_pool": "untrusted-pr",
     "attempt": 1,
     "name": "go-test-race",
     "commit_oid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -164,7 +169,7 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 - **Check Run Status Enum:** `queued` | `in_progress` | `completed` | `cancelled`.
 - **Check Run Conclusion Enum (set when `status == completed`):** `success` | `failure` | `neutral` | `skipped` | `timed_out` | `infra_error` | `cancelled`.
-- **Stacked-Diff Inheritance:** When `inherited_from_run_id` is non-null, Review renders a badge ("Inherited from parent PR #N") and links to the parent run's logs while still showing the check as satisfied for the child `commit_oid`.
+- **Stacked-Diff Inheritance:** When `inherited_from_run_id` is non-null, Review renders a badge ("Inherited from parent PR #N") and links to the parent run's logs while still showing the check as satisfied for the child `commit_oid`. Inheritance is strictly partitioned by `(tenant_id, repo_id, tree_oid, check_name, app_id, runner_pool, policy_version)` per [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md).
 
 ## 7. Failure Modes, Timeouts & Idempotency
 
@@ -188,8 +193,8 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 - [ ] Honor `Idempotency-Key` on `POST /v1/check-suites`, `/rerun`, and `/cancel` (starting/signaling Temporal CI DAG workflows) so Review retries never spawn duplicate suites.
 - [ ] Publish `run.check_suite.updated` and `run.check_run.updated` / `check.completed` to `STRAVIN_RUN` JetStream with `Nats-Msg-Id`, `traceparent`, `commit_oid`, `tree_oid`, and `inherited_from_run_id`.
-- [ ] Enforce the 50/batch and 1,000/run annotation caps before calling Review.
-- [ ] Validate `actor_id` RBAC and constant-time `tenant_id` on `rerun` and `cancel` endpoints.
+- [ ] Enforce the 50/batch and 1,000/run annotation caps, `https://` registered-origin validation on external `details_url`, and Run-minted `log_stream_url` tokens before calling Review or publishing to `STRAVIN_RUN`.
+- [ ] Validate `actor_id` RBAC, `untrusted-pr` vs. `protected`/`gate` pool isolation, and constant-time `tenant_id` on internal and external ingress endpoints.
 
 ### Shared Contract-Test Fixtures
 

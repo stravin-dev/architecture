@@ -1,6 +1,6 @@
 # Stravin Core ⟷ Stravin Run
 
-This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Run** (ephemeral CI build/test runners and pipeline scheduler).
+This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Run** (ephemeral CI build/test runners and pipeline scheduler). External runner token scoping, `bundle-uri` gating, and `jti` revocation follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md).
 
 ## 1. Boundary & Ownership
 
@@ -29,7 +29,7 @@ sequenceDiagram
     NATS-->>Run: Durable consumer delivery (run-core-triggers)
     Run->>Run: Match trigger rules (ref glob, tag, workflow YAML)
     Run->>Edge: Request short-lived git:read token (Cilium eBPF mTLS) [vNext]
-    Edge-->>Run: Scoped token (TTL 15m, repo-bound)
+    Edge-->>Run: Scoped token (commit_oid-pinned, TTL <= 120s for external)
     Run->>Runner: Boot ephemeral sandbox with (repo_url, commit_oid, token)
 
     Runner->>Edge: GET /{tenant}/{repo}.git/info/refs?service=git-upload-pack (Git-Protocol: version=2)
@@ -56,8 +56,10 @@ sequenceDiagram
 - **Cilium eBPF Transport & Network Policy:** Run's control plane communicates with `stravin-edge` and NATS JetStream over **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists. Ephemeral runner sandboxes are isolated by a strict egress `CiliumNetworkPolicy` permitting only `stravin-edge` (and presigned S3 bundle URLs), never `stravin-node` or internal NATS/DB ports.
 - **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. `stravin-edge` (`edge.AuthorizeTenant`) and Run's JetStream consumers MUST verify `tenant_id` in constant time in application code on every request and event.
 - **Runner Clone Auth (Implemented in Core v1.12.x):** Runners clone over Smart HTTP (`Authorization: Bearer <token>`) or SSH against `stravin-edge`. `edge.AuthorizeTenant` enforces strict tenant isolation.
-- **Short-Lived Scoped Git Tokens (Proposed Core Extension vNext):** Before booting a runner, Run's control plane mints a read-only token scoped to `(tenant_id, repo_id, commit_oid|ref_globs, scope="git:read", exp=now+15m)`. Write tokens (`scope="git:write"`) are issued only for explicitly configured release/tag workflows and are never granted to untrusted PR runs.
-- **Zero Direct Storage Access:** Ephemeral runners NEVER receive AWS IAM credentials for Core's S3 pack bucket or DynamoDB table. All object access flows through `stravin-edge` or time-limited presigned S3 URLs for `bundles/{tenant_id}/{repo_id}/latest.bundle`.
+- **Short-Lived Scoped Git Tokens (Proposed Core Extension vNext — [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):**
+    - **External Job-Lease & Checks API Checkouts:** Mint **`commit_oid`-pinned `git:read` tokens with `TTL <= 120s`** (matching exact-OID fetches and the 120 s checkout timeout), refreshed only through Run while the lease/job remains active. Never embed Git tokens in outbound `stravin-webhooks` payloads; external CI exchanges its OIDC workload assertion just-in-time before checkout. All external tokens enforce strict `aud` pinning, short `exp`, and `jti` replay protection.
+    - **Pool Isolation & Write Restriction:** Strictly isolate `untrusted-pr` vs. `protected`/`gate` `runner_pool`s via pool-scoped OIDC claims. External runners default to `git:read` only. Write tokens (`scope="git:write"`) are issued **exclusively** for explicitly configured protected release/tag pools with narrow `ref_globs`, never to `untrusted-pr` pools, and carry active server-side `jti` revocation at `stravin-edge` (Valkey `jti` denylist) immediately upon lease termination or `< 200 ms` cancel.
+- **Zero Direct Storage Access:** Ephemeral hosted and external runners NEVER receive AWS IAM credentials for Core's S3 pack bucket or DynamoDB table. All object access flows through `stravin-edge` or (only when `git:bundle:read` is explicitly granted) time-limited presigned S3 URLs for `bundles/{tenant_id}/{repo_id}/latest.bundle`.
 - **Untrusted Code Isolation:** Core treats every runner clone/fetch as an untrusted external Git client subject to `stravin-edge` per-tenant rate limits (`edge.Limiter`), `Git-Protocol` sanitization (`rpc.SanitizeGitProtocol`), and body-size caps (`256 MiB`).
 
 ## 4. Synchronous Interfaces
@@ -74,8 +76,8 @@ CI fan-out (e.g., 50 matrix jobs cloning the same `commit_oid` simultaneously) i
 
 Core v1.12.x defines the S3 key convention `bundles/{tenant_id}/{repo_id}/latest.bundle` (`s3.BundleKey`). In vNext:
 
-- `stravin-edge` advertises `bundle-uri` in Protocol v2 capabilities when a recent bundle exists.
-- On `command=bundle-uri`, `stravin-edge` returns a short-lived (5-minute) presigned HTTPS URL pointing to the regional S3 bucket or CDN edge, allowing large monorepo runners to download the base pack directly from S3 and only fetch the tiny delta from `stravin-node`.
+- `stravin-edge` advertises `bundle-uri` in Protocol v2 capabilities **only** when a recent bundle exists **and** the authenticated Git token explicitly carries the **`git:bundle:read`** scope ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)). `git:bundle:read` is auto-granted to Cilium-attested internal runner pools and opt-in for authorized external OIDC leases/Apps; `stravin-edge` suppresses `bundle-uri` advertisement for external `commit_oid`-pinned tokens lacking `git:bundle:read`.
+- On `command=bundle-uri`, `stravin-edge` returns a short-lived presigned HTTPS URL whose TTL is capped to **`min(token_remaining_ttl, 120s)`**, pointing to the regional S3 bucket or CDN edge so authorized large-monorepo runners download the base pack directly from S3 and fetch only the tiny delta from `stravin-node`.
 
 ### 4.3 Scoped Token Minting API — *Proposed Core Extension (vNext)*
 
@@ -90,9 +92,10 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
   "tenant_id": "acme",
   "repo_id": "monorepo",
   "actor_id": "svc:stravin-run:run_01JDF9A1B2C3D4E5F6G7H8J9K0",
+  "runner_pool": "untrusted-pr",
+  "commit_oid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
   "scopes": ["git:read"],
-  "ref_globs": ["refs/heads/*", "refs/stravin/gate/*"],
-  "ttl_seconds": 900
+  "ttl_seconds": 120
 }
 ```
 
@@ -101,10 +104,15 @@ Response (`200 OK`):
 ```json
 {
   "token": "stv_git_v1_...",
-  "expires_at": "2026-11-24T22:30:03Z",
+  "jti": "jti_01JDF9A1B2C3D4E5F6G7H8J9K0",
+  "aud": "stravin-edge",
+  "expires_at": "2026-11-24T22:17:03Z",
   "clone_url": "https://git.stravin.internal/acme/monorepo.git"
 }
 ```
+
+- **Optional `git:bundle:read` Scope:** Authorized internal or opt-in external pools include `"git:bundle:read"` in `scopes` to enable `bundle-uri` (presigned URL TTL `<= min(token_remaining_ttl, 120s)`).
+- **Protected Release Write Tokens & Revocation:** Only explicitly configured protected release/tag pools may request `"git:write"` with narrow `ref_globs`; Run revokes active external write tokens immediately on cancel or lease termination via `POST /internal/v1/tokens/git/{jti}/revoke` (backed by a Valkey `jti` denylist in `stravin-edge`).
 
 ## 5. Asynchronous Events & Streams
 
@@ -127,7 +135,7 @@ Response (`200 OK`):
 | :--- | :--- | :--- |
 | **Valkey or S3 pack cache unavailable** | `TieredPackCache` logs a warning and transparently falls back to `stravin-node` (`git-upload-pack`). Runners see higher latency but zero errors. | Transparent in `stravin-edge`. |
 | **`stravin-edge` returns `429` or `503` during matrix burst** | Runner retries `git fetch` with capped exponential backoff + jitter (initial `500 ms`, max `15 s`, max 4 attempts) before failing checkout as `INFRA_ERROR` (not test failure). | Checkout timeout: 120 s (configurable per repo size). |
-| **Token expires mid-long-clone** | Runner requests a refreshed token from Run control plane (if job still active) and retries fetch. | Token TTL default 15 m; refresh threshold 2 m before expiry. |
+| **Token expires mid-long-clone** | Runner requests a refreshed `commit_oid`-pinned token from Run's active-lease refresh endpoint (only while lease/job is active) and retries fetch; external runners without `git:bundle:read` rely on their Git credential helper for seamless refresh. | External `git:read` TTL `<= 120s`; refresh while lease active. |
 | **Duplicate push event from JetStream redelivery** | JetStream deduplicates `Nats-Msg-Id` at publish time, and Run deduplicates trigger ingestion on `idempotency_key` (`tenant_id:repo_id:ref:ulid`), preventing duplicate pipeline/workflow spawns. | Idempotency window >= 24 hours; exhausted messages route to `STRAVIN_DLQ`. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
@@ -135,8 +143,8 @@ Response (`200 OK`):
 ### Side A: Stravin Core Build Checklist
 
 - [ ] Maintain Protocol v2 `TieredPackCache` (Valkey + S3 spillover) and `PackCacheCoordinator` singleflight (Implemented in Core v1.12.x).
-- [ ] Add `POST /internal/v1/tokens/git` short-lived scoped token minting on `stravin-edge` with app-level `tenant_id` check (vNext).
-- [ ] Wire `bundle-uri` capability advertisement and presigned URL generation for `s3.BundleKey` (vNext).
+- [ ] Add `POST /internal/v1/tokens/git` short-lived `commit_oid`-pinned token minting (`TTL <= 120s` for external `git:read`, `aud`/`jti` pinning) and `POST /internal/v1/tokens/git/{jti}/revoke` Valkey denylist on `stravin-edge` with app-level `tenant_id` check (vNext).
+- [ ] Gate `bundle-uri` capability advertisement and presigned URL generation (`TTL <= min(token_remaining_ttl, 120s)`) on explicit `git:bundle:read` scope, suppressing it for external `commit_oid`-pinned tokens without that scope (vNext).
 - [ ] Publish `stravin.core.<tenant_id>.<repo_id>.ref.updated` to NATS JetStream from `stravin-relay` (renamed from `stravin-hook` in `vNext`) with `Nats-Msg-Id`, `prev_oid`, `ulid`, and `traceparent` (vNext).
 
 ### Side B: Stravin Run Build Checklist
