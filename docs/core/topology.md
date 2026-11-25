@@ -88,6 +88,7 @@ Keeping Git operations at the packfile layer—rather than reimplementing Git's 
     - Maintains regional write leases, orchestrates `home_region` ownership transitions, increments `failover_epoch` fencing tokens, and runs post-failover S3 pack verification scrubs and ref rewinds via its authenticated HTTP admin API (`/v1/lease/*`, `/v1/epoch/advance`, `/v1/scrub`, `/v1/recovery/reconcile`).
 5. **`stravin-hook` (Async Outbox & Webhook Worker Pool):**
     - Consumes DynamoDB Streams (`Ref History` `NEW_IMAGE` inserts), persists per-shard checkpoints in DynamoDB, decrypts webhook signing secrets via KMS, and delivers HMAC-SHA256-signed HTTP webhooks with exponential backoff and dead-letter queue (DLQ) recording off the `git push` path.
+    - *`vNext` rename:* Per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md), renamed to **`stravin-relay`** in `vNext`—a pure DynamoDB Streams -> NATS JetStream transactional outbox relay running zero Wasm and zero external HTTP webhooks (external delivery moves to `stravin-webhooks`).
 6. **`stravin-admin` CLI (`cmd/stravin-admin`):**
     - Operational CLI for repository provisioning (`repo`), Tier 1 Wasm hook registration (`hook`), and Tier 2 webhook management (`webhook`).
 

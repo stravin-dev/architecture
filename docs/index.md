@@ -30,7 +30,7 @@ Stravin separates brand identity from operational clarity across three tiers:
     - `stravin-node` — Stateless virtual Git replica with warm NVMe bare-repo caches, pure-Go Protocol v2 `ls-refs`, and `wazero` Wasm sync hook execution
     - `stravin-pack` — Out-of-band sharded packfile compaction, index generation, and delayed garbage collection
     - `stravin-ctrl` — Multi-region failover orchestration, regional write leases, fencing epochs, and post-failover integrity scrubbing
-    - `stravin-hook` — Asynchronous post-receive hook and signed webhook worker pool consuming DynamoDB Streams
+    - `stravin-hook` — Asynchronous post-receive hook and signed webhook worker pool consuming DynamoDB Streams (`v1.12.x`; renamed to `stravin-relay` in `vNext` as a pure DynamoDB Streams -> NATS JetStream outbox relay per [ADR-0001](adr/0001-platform-transport-events-webhooks.md))
     - `stravin-admin` (`cmd/stravin-admin`) — Operational CLI for managing repositories (`repo`), Tier 1 Wasm hooks (`hook`), and Tier 2 webhooks (`webhook`)
 
 ## Organization Repositories & Licensing
