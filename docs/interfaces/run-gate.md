@@ -2,7 +2,7 @@
 
 This specification defines the contract between **Stravin Run** (CI runners and pipeline execution) and **Stravin Gate** (speculative merge queues and merge policy).
 
-> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Run nor Stravin Gate is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification.
+> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Run nor Stravin Gate is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification. External runner pool isolation, `app_id` verdict binding, partitioned `tree_oid` reuse, and Run-only `INFRA_ERROR` boundaries follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md).
 
 ## 1. Boundary & Ownership
 
@@ -10,7 +10,7 @@ This specification defines the contract between **Stravin Run** (CI runners and 
 | :--- | :--- | :--- |
 | **Speculative merge-queue topology, required check names, batching/bisection strategy, merge decision** | **Stravin Gate** | Queue state machine, batch bisection algorithm, `policy_version` rules, Core `AtomicRefCAS` |
 | **Check execution, runner pool, artifact/test caching, individual check verdicts** | **Stravin Run** | MicroVM scheduling, cache hit computation, step logs, retry of flaky infra errors |
-| **Verdict binding `(tree_oid, commit_oid, policy_version)`** | **Stravin Run** (attests execution) -> **Stravin Gate** (evaluates policy) | Gate accepts a verdict only when `tree_oid` and `commit_oid` match the exact speculative merge commit and `policy_version` matches the active rule set |
+| **Verdict binding `(tenant_id, repo_id, tree_oid, commit_oid, policy_version, app_id)`** | **Stravin Run** (attests execution / validates external `app_id`) -> **Stravin Gate** (evaluates policy) | Gate accepts a verdict only when `tree_oid`, `commit_oid`, `policy_version`, and `app_id` match the exact speculative merge commit and active rule set |
 
 ## 2. Interaction Flow
 
@@ -28,7 +28,7 @@ sequenceDiagram
     alt All required checks pass
         Run->>NATS: Publish stravin.run.<tenant>.<repo>.gate_verdict.ready (Nats-Msg-Id, traceparent)
         NATS-->>Gate: Durable consumer delivery (gate-run-verdicts)
-        Gate->>Gate: Verify (tree_oid, commit_oid, policy_version) & advance merge
+        Gate->>Gate: Verify (tenant_id, repo_id, tree_oid, commit_oid, policy_version, app_id) & advance merge
     else Earlier queue entry evicted (speculative chain invalidated)
         Gate->>Run: POST /v1/gate-builds/{batch_run_id}/cancel (reason: QUEUE_RESET)
         Run-->>Gate: 202 Accepted (terminating runners immediately)
@@ -41,8 +41,9 @@ sequenceDiagram
 
 - **Cilium eBPF Transport & Network Policy:** Bidirectional HTTP/2 or gRPC calls and NATS JetStream traffic traverse **Cilium (eBPF)** transparent WireGuard/SPIFFE mTLS with `CiliumNetworkPolicy` allowlists (or app-level TLS 1.3 mTLS locally), plus signed service JWTs (`tenant_id`, `scopes: ["run:gate-build", "run:cancel"]` for Gate -> Run; scoped NATS publish/subscribe credentials on `STRAVIN_RUN`).
 - **Mandatory App-Level Tenancy Check:** Cilium verifies workload identity, NOT `tenant_id`. Both Gate and Run MUST verify `tenant_id` in constant time in application code on every HTTP request and NATS JetStream message.
-- **Tamper-Evident Verdict Attestation:** Every verdict event published by Run to `STRAVIN_RUN` carries `(tenant_id, repo_id, queue_entry_id, commit_oid, tree_oid, policy_version, check_name, conclusion)` (with optional detached attestation signature for high-assurance compliance policies). Gate rejects any verdict whose `tenant_id`, `commit_oid`, or `tree_oid` does not match its active speculative entry.
-- **No Unbounded Runner Waste:** Gate's fast-cancel API (`POST /v1/gate-builds/{batch_run_id}/cancel`) is high-priority and bypasses normal rate limits so evicted speculative batches stop burning runner CPU within seconds.
+- **Tamper-Evident Verdict Attestation & External `app_id` Binding ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):** Every verdict event published by Run to `STRAVIN_RUN` carries `(tenant_id, repo_id, queue_entry_id, commit_oid, tree_oid, policy_version, app_id, check_name, conclusion)` (with optional detached attestation signature for high-assurance compliance policies). Gate rejects any verdict whose `tenant_id`, `repo_id`, `commit_oid`, `tree_oid`, `policy_version`, or `app_id` does not match its active speculative entry and policy allowlist. For Phase 2 external Checks API apps, each OIDC App installation is bound to an explicit `(tenant_id, repo_id, check_name_prefix)` allowlist matching an active `batch_run_id`.
+- **Pool Isolation & Run-Only `INFRA_ERROR` Boundary:** Gate builds execute exclusively on `protected`/`gate` runner pools—never on `untrusted-pr` pools. `INFRA_ERROR` classification is strictly **Run-only**; external Checks API callers can never self-assert `INFRA_ERROR` to trigger automated Gate front-of-queue requeues or merge-queue pauses.
+- **No Unbounded Runner Waste:** Gate's fast-cancel API (`POST /v1/gate-builds/{batch_run_id}/cancel`) is high-priority and bypasses normal rate limits so evicted speculative batches stop burning runner CPU within seconds. (Phase 2 BYO-CI external engines run in a degraded tier without `< 200 ms` runner-kill guarantees and rely on Gate's `timeout_seconds` and 30 s reconciliation backstop.)
 
 ## 4. Synchronous Interfaces
 
@@ -100,7 +101,7 @@ Authorization: Bearer <service-jwt>
 }
 ```
 
-- Run MUST acknowledge cancellation in `< 200 ms` and propagate `SIGTERM` -> `SIGKILL` to active sandboxes asynchronously.
+- Run MUST acknowledge cancellation in `< 200 ms`, revoke server-side job-lease tokens (and any external `git:write` `jti`s), and propagate `SIGTERM` -> `SIGKILL` / `cancel-poll` directives to hosted and Phase 1 external runners asynchronously. Phase 2 BYO-CI external engines have no `< 200 ms` runner-kill guarantee and fall back to Gate's `timeout_seconds` and 30 s reconciliation backstop.
 
 ### 4.3 Gate -> Run: Verdict Reconciliation Pull — *Proposed Contract (vNext)*
 
@@ -133,9 +134,9 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
     "policy_version": "pol_01JDE0...",
     "overall_verdict": "PASSED",
     "checks": [
-      {"name": "go-test-race", "run_id": "run_01JDF9...", "conclusion": "success", "reused_from_tree_oid": false},
-      {"name": "lint", "run_id": "run_01JDF8...", "conclusion": "success", "reused_from_tree_oid": true},
-      {"name": "e2e-smoke", "run_id": "run_01JDF9...", "conclusion": "success", "reused_from_tree_oid": false}
+      {"name": "go-test-race", "run_id": "run_01JDF9...", "app_id": "stravin-run", "runner_pool": "gate", "conclusion": "success", "reused_from_tree_oid": false},
+      {"name": "lint", "run_id": "run_01JDF8...", "app_id": "stravin-run", "runner_pool": "gate", "conclusion": "success", "reused_from_tree_oid": true},
+      {"name": "e2e-smoke", "run_id": "run_01JDF9...", "app_id": "stravin-run", "runner_pool": "gate", "conclusion": "success", "reused_from_tree_oid": false}
     ]
   }
 }
@@ -145,16 +146,16 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 ## 6. Shared Data Contracts & Identifiers
 
-- **Verdict Binding Tuple:** `(tenant_id, repo_id, tree_oid, commit_oid, policy_version)`.
-    - When `allow_tree_oid_reuse: true`, Run may satisfy a deterministic check using a prior passing run with identical `(tenant_id, repo_id, tree_oid, check_name)` (e.g., when a commit is rebased onto `main` with an identical resulting tree), setting `reused_from_tree_oid: true`.
+- **Verdict Binding Tuple:** `(tenant_id, repo_id, tree_oid, commit_oid, policy_version, app_id)`.
+    - **Partitioned `tree_oid` Verdict Reuse ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):** When `allow_tree_oid_reuse: true`, Run may satisfy a deterministic check using a prior passing run ONLY with identical `(tenant_id, repo_id, tree_oid, check_name, app_id, runner_pool, policy_version)` (e.g., when a commit is rebased onto `main` with an identical resulting tree), setting `reused_from_tree_oid: true`. Partitioning by `app_id`, `runner_pool`, and `policy_version` ensures `untrusted-pr` pools or lower-trust external apps can never poison or satisfy protected `gate` verdicts.
     - Gate's policy may disallow `tree_oid` reuse for non-hermetic integration checks by setting `allow_tree_oid_reuse: false`.
-- **Overall Verdict Enum:** `PASSED` | `FAILED` | `INFRA_ERROR` | `TIMED_OUT` | `CANCELLED`.
+- **Overall Verdict Enum:** `PASSED` | `FAILED` | `INFRA_ERROR` | `TIMED_OUT` | `CANCELLED` (where `INFRA_ERROR` is strictly Run-only; external Checks API transient failures map to non-retrying conclusions such as `external_infra_error` or `failure` -> `FAILED`).
 
 ## 7. Failure Modes, Timeouts & Idempotency
 
 | Failure Scenario | Behavior & Degradation | Timeout / Retry Policy |
 | :--- | :--- | :--- |
-| **Check fails with `infra_error` (runner crash / Core 503)** | Run auto-retries once internally; if still `INFRA_ERROR`, Gate does NOT blame the PR — it requeues at the front of the queue (up to 2 retries) before pausing the queue and alerting operators. | Prevents innocent PRs from being evicted on transient CI outages. |
+| **Check fails with `infra_error` (Run-only: runner crash / Core 503)** | Run auto-retries once internally; if still `INFRA_ERROR`, Gate does NOT blame the PR — it requeues at the front of the queue (up to 2 retries) before pausing the queue and alerting operators. External Checks API callers CANNOT self-assert `INFRA_ERROR`; their transient failures map to `external_infra_error` or `failure` (non-retrying in Gate). | Prevents innocent PRs from being evicted on Run outages while preventing external CI apps from amplifying queue retries or pausing Gate. |
 | **Speculative batch exceeds `timeout_seconds`** | Gate sends `/cancel` (`reason: "QUEUE_TIMEOUT"`) and evicts the entry with `QUEUE_TIMEOUT`. | Default `timeout_seconds: 1800` (30 m). |
 | **JetStream verdict event delayed or dead-lettered** | Durable `gate-run-verdicts` consumer redelivers (with `STRAVIN_DLQ` advisory on exhaustion); Gate also polls `GET /v1/gate-builds/{batch_run_id}` every 30 s for any active batch without a recent event. | Ensures queue head never stalls silently. |
 | **Stale verdict arrives after queue reset** | Gate checks `(queue_entry_id, commit_oid, policy_version)` and discards verdicts for superseded `commit_oid`s. | Idempotent and safe against out-of-order delivery. |
@@ -165,12 +166,12 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 - [ ] Implement idempotent `POST /v1/gate-builds`, `POST /v1/gate-builds/{id}/cancel`, and `GET /v1/gate-builds/{id}` (backed by Temporal CI DAG workflows) with app-level `tenant_id` check.
 - [ ] Publish `stravin.run.<tenant_id>.<repo_id>.gate_check.completed` and `gate_verdict.ready` to `STRAVIN_RUN` JetStream with `Nats-Msg-Id` and `traceparent` immediately on individual failures for fail-fast eviction.
-- [ ] Support `tree_oid` verdict reuse strictly scoped to `(tenant_id, repo_id, tree_oid, check_name)` and gated by `allow_tree_oid_reuse`.
-- [ ] Distinguish `infra_error` from `failure` in conclusions.
+- [ ] Support `tree_oid` verdict reuse strictly partitioned by `(tenant_id, repo_id, tree_oid, check_name, app_id, runner_pool, policy_version)` and gated by `allow_tree_oid_reuse`.
+- [ ] Enforce Run-only `INFRA_ERROR` classification (mapping external Checks API transient errors to non-retrying `external_infra_error`/`failure`) and `(tenant_id, repo_id, check_name_prefix)` allowlists for external OIDC App installations.
 
 ### Side B: Stravin Gate Build Checklist
 
-- [ ] Bind every speculative build request and verdict verification to `(tree_oid, commit_oid, policy_version)` with deterministic `Idempotency-Key`s in Gate's Temporal activities.
+- [ ] Bind every speculative build request and verdict verification to `(tenant_id, repo_id, tree_oid, commit_oid, policy_version, app_id)` with deterministic `Idempotency-Key`s in Gate's Temporal activities.
 - [ ] Bind durable JetStream consumer `gate-run-verdicts` on `STRAVIN_RUN` and call `/cancel` immediately whenever an entry is evicted or a speculative chain resets.
 - [ ] Poll `GET /v1/gate-builds/{batch_run_id}` as a staleness backstop for active queue entries.
 - [ ] Requeue (rather than evict) on `INFRA_ERROR` up to the configured retry budget.

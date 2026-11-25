@@ -74,13 +74,14 @@ Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stra
 - [Core ⟷ Gate](interfaces/core-gate.md) — Protected-ref enforcement via synchronous `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, speculative refs (`refs/stravin/gate/*`), `failover_epoch` fencing, and Gate's Temporal workflows.
 - [Review ⟷ Run](interfaces/review-run.md) — Check suite/run lifecycle over NATS JetStream, inline annotations, live log streaming URLs, idempotent re-run/cancel commands, stacked-diff check inheritance, and Run's Temporal workflows.
 - [Review ⟷ Gate](interfaces/review-gate.md) — PR approval and policy eligibility snapshots, idempotent enqueue/dequeue/priority API, JetStream queue feedback, atomic stacked-diff merge groups, and Gate's Temporal workflows.
-- [Run ⟷ Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version)`, fast cancellation on queue eviction/reset, and independent Temporal workflows for Run and Gate.
+- [Run ⟷ Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version, app_id)`, fast cancellation on queue eviction/reset, and independent Temporal workflows for Run and Gate.
 - [Review ⟷ Index](interfaces/review-index.md) — PR diff code intelligence (hover, go-to-definition, find-references, cross-repo callers) over Cilium mTLS with RBAC filtering and graceful lag fallback.
 - [External Webhooks](interfaces/external-webhooks.md) — Dedicated `stravin-webhooks` service consuming internal NATS JetStream streams for outbound customer HTTP delivery, KMS HMAC-SHA256 signing, SSRF isolation, and DLQ replay.
 
 ## Architecture Decision Records
 
 - [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](adr/0001-platform-transport-events-webhooks.md) — Adopts Cilium (eBPF) sidecarless mTLS, NATS JetStream for internal async events, a dedicated `stravin-webhooks` service for outbound customer delivery, and Temporal as the official durable workflow engine for Run and Gate with a four-phase rollout plan.
+- [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](adr/0002-external-runner-seam-and-oidc-auth.md) — Adopts a phased hybrid external runner seam (Phase 1 pull-based Job-Lease under Run's Temporal DAG; Phase 2 degraded-tier BYO-CI via `stravin-webhooks` + `app_id`-bound Checks API), scopes OIDC Apps strictly to external callers, and defines Core/Run/Gate security hardening invariants.
 
 ## Operations & Tooling
 

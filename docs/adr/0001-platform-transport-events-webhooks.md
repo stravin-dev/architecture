@@ -199,6 +199,7 @@ Rather than introducing all four pillars in one big-bang cutover—or building t
 
 ## Related Documents
 
+- [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](0002-external-runner-seam-and-oidc-auth.md) — Phased external runner job-lease vs. Checks API seam, external-only OIDC App auth scope, and Core/Run/Gate security hardening invariants.
 - [Product-Stack Interface Overview & Matrix](../interfaces/index.md) — System topology, intersection matrix, and shared contract conventions.
 - [External Webhooks Interface](../interfaces/external-webhooks.md) — Full meet-in-the-middle contract for `stravin-webhooks`.
 - [Server-Side Hooks](../core/hooks.md) — Core `v1.12.x` three-tier hook architecture and `vNext` JetStream evolution.
