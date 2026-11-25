@@ -1,8 +1,8 @@
-# ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflow Seam
+# ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows
 
 - **Status:** Proposed
 - **Date:** 2026-11-24
-- **Scope:** Cross-product transport, service discovery, internal async event backbone, outbound customer webhooks, and future workflow orchestration across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, and **Stravin Webhooks** (`stravin-webhooks`).
+- **Scope:** Cross-product transport, service discovery, internal async event backbone, outbound customer webhooks, and durable workflow orchestration across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, and **Stravin Webhooks** (`stravin-webhooks`).
 
 ## Context
 
@@ -16,16 +16,16 @@ As Stravin grows from a single Git engine into a multi-product platform (**Revie
 1. **Service-to-service transport overhead on 256 MiB Git streams:** Sidecar proxy meshes inject an extra L7 TCP/HTTP proxy hop (and CPU/memory tax) on every `stravin-edge` -> `stravin-node` packfile stream and interfere with `stravin-edge`'s custom HRW `(tenant_id, repo_id)` pinning.
 2. **Point-to-point internal webhook fragility:** Fan-out from Core to Review, Run, Index, and Gate over direct HTTP `POST` webhooks couples producers to every consumer's endpoint availability, lacks durable replay for Index backfill/recovery, and duplicates retry/DLQ machinery in every product.
 3. **External internet blast radius inside Core:** Delivering outbound customer/third-party webhooks from `stravin-hook` inside Core exposes the Git engine to slow endpoints, SSRF/DNS-rebinding attacks, noisy-neighbor retries, and customer delivery-log APIs that do not belong in a bare Git engine.
-4. **Long-running state machines in Run and Gate:** CI DAG execution (fan-out/fan-in, cancellations, timeouts) in **Stravin Run** and speculative merge-queue loops (rebase, cancel, bisect, promote) in **Stravin Gate** will eventually outgrow hand-rolled DB state machines. Without an explicit workflow boundary today, introducing a durable workflow engine later would force breaking cross-product wire changes.
+4. **Long-running workflows in Run and Gate:** CI pipeline DAG execution (fan-out/fan-in, heartbeating, retries, cancellations, timeouts) in **Stravin Run** and speculative merge-queue batch orchestration (enqueue/dequeue/verdict signals, rebase, cancel, bisect, atomic Ref-CAS promotion) in **Stravin Gate** are inherently durable, failure-sensitive workflows. Hand-rolling custom DB state machines as a stop-gap duplicates timer, retry, signal, and crash-recovery plumbing only to require a costly rewrite later.
 
 ## Decision
 
-We adopt a four-pillar platform transport and event architecture for Stravin `vNext`:
+We adopt a four-pillar platform transport, event, and workflow architecture for Stravin `vNext`:
 
 1. **Service Mesh & Transport — Cilium (eBPF)**
 2. **Internal Async Event Backbone — NATS JetStream**
 3. **Dedicated External Webhooks Service — Stravin Webhooks (`stravin-webhooks`)**
-4. **Future Durable Workflow Seam — Temporal (scoped strictly behind Run and Gate)**
+4. **Durable Workflow Engine — Temporal (official for Stravin Run and Stravin Gate)**
 
 ```mermaid
 flowchart TB
@@ -40,23 +40,24 @@ flowchart TB
         end
 
         NATS["NATS JetStream Cluster\n(3- or 5-pod Raft StatefulSet + PVCs)\nstravin.<product>.<tenant_id>.<repo_id>.<event>"]
+        Temporal["Temporal Cluster\n(Durable Workflow Runtime\nfor Run & Gate only)"]
 
-        Review["Stravin Review\n(PRs & Stacked Diffs)"]
-        Index["Stravin Index\n(Search, Symbols & Replay Backfill)"]
+        Review["Stravin Review\n(PRs & Stacked Diffs)\n[Temporal-Free]"]
+        Index["Stravin Index\n(Search, Symbols & Replay Backfill)\n[Temporal-Free]"]
 
         subgraph RunBox["Stravin Run"]
-            RunAPI["Run API / Event Consumer\n(Idempotent Command Seam)"]
-            RunWF["Future Temporal Seam\n(CI DAGs, Fan-out/Fan-in, Cancel)"]
+            RunAPI["Run API / Event Consumer\n(Idempotent Command Boundary)"]
+            RunWF["Temporal Workflows & Workers\n(CI DAGs, Fan-out/Fan-in,\nHeartbeats, Retries, Cancel)"]
             RunAPI --- RunWF
         end
 
         subgraph GateBox["Stravin Gate"]
-            GateAPI["Gate API / Event Consumer\n(Idempotent Command Seam)"]
-            GateWF["Future Temporal Seam\n(Speculative Merge Queue Loops)"]
+            GateAPI["Gate API / Event Consumer\n(Idempotent Command Boundary)"]
+            GateWF["Temporal Workflows & Workers\n(Speculative Merge Queue,\nSignals, Atomic Ref-CAS)"]
             GateAPI --- GateWF
         end
 
-        Webhooks["Stravin Webhooks (stravin-webhooks)\n(Dedicated Egress CiliumNetworkPolicy,\nKMS HMAC-SHA256, SSRF Guard, DLQ/Replay)"]
+        Webhooks["Stravin Webhooks (stravin-webhooks)\n(Dedicated Egress CiliumNetworkPolicy,\nKMS HMAC-SHA256, SSRF Guard, DLQ/Replay)\n[Temporal-Free]"]
 
         Relay -->|"Publish stravin.core.>"| NATS
         Review <-->|"Publish / Consume stravin.review.>"| NATS
@@ -64,6 +65,9 @@ flowchart TB
         GateAPI <-->|"Publish / Consume stravin.gate.>"| NATS
         NATS -->|"Durable Pull Consumer + Replay"| Index
         NATS -->|"Subscribe stravin.*.>"| Webhooks
+
+        RunWF <-->|"Workflows / Activities / Signals"| Temporal
+        GateWF <-->|"Workflows / Activities / Signals"| Temporal
 
         Review <-->|"gRPC / HTTP (App tenant_id AuthZ)"| Node
         Review <-->|"gRPC CodeIntel"| Index
@@ -132,12 +136,16 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
     - Strict SSRF and egress isolation: dedicated egress `CiliumNetworkPolicy` (zero access to internal platform services except JetStream and its own DB/KMS), DNS rebinding protection, and private/link-local/loopback IP blocking on resolved dial addresses.
 - **Detailed Contract:** See [External Webhooks Interface](../interfaces/external-webhooks.md) for the full meet-in-the-middle specification.
 
-### Pillar 4: Future Durable Workflow Seam — Temporal
+### Pillar 4: Durable Workflow Engine — Temporal
 
-- **Not Required on Day 1:** Teams do not need to deploy or operate a Temporal cluster to ship v1 of Review, Run, Index, or Gate.
-- **Where the Seam Belongs:** Only **Stravin Run** (multi-step CI DAGs, fan-out/fan-in, cancellations, timeouts) and **Stravin Gate** (speculative merge-queue batch state machines, rebase/cancel/promote loops) manage complex, long-lived, failure-sensitive workflows that benefit from Temporal.
-- **Contract Requirement Now:** Run and Gate MUST expose **idempotent command/activity boundaries** (`Idempotency-Key` on all mutating APIs, deterministic state transitions, explicit cancellation and status-reconciliation endpoints) and consume/emit canonical **NATS JetStream** events. This guarantees Temporal can be introduced internally behind Run and Gate later with **zero wire-contract changes** for Core, Review, Index, or `stravin-webhooks`.
-- **Services Staying Temporal-Free:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** remain permanently Temporal-free.
+- **Official Platform Pillar for Run & Gate:** **Temporal** is the committed durable workflow runtime for **Stravin Run** and **Stravin Gate**. Neither product builds throwaway custom DB state machines; both implement their orchestration directly on Temporal Workflows, Activities, and Signals from day one:
+    - **Stravin Run:** CI pipeline DAG workflows, parallel fan-out/fan-in across matrix jobs, runner activity heartbeating, transient infra-error retries, timeouts, and fast cancellation.
+    - **Stravin Gate:** Speculative merge-queue batch workflows, external signals for enqueue/dequeue/eligibility invalidation/CI verdicts/Core ref drift, batch bisection, and idempotent `GateOps` (`ComputeMergeTree`, `AtomicRefCAS`) merge activities.
+- **Deployment Topology:**
+    - **Local Development (Docker Compose):** Single `temporal` dev container (`temporal server start-dev`) running alongside Core, Floci, Valkey, Grafana LGTM, `nats -js`, and `stravin-webhooks`.
+    - **Production Kubernetes (TBD / Planned):** Dedicated Temporal Cluster (Frontend, History, Matching, and Worker services backed by durable persistence) with isolated namespaces for `stravin-run` and `stravin-gate`.
+- **Clean Cross-Product Wire Boundary:** Even with Temporal as an official engine, Run and Gate still expose **idempotent command/query APIs** (`Idempotency-Key` on all mutating endpoints, explicit cancellation and status-reconciliation reads) and consume/emit canonical **NATS JetStream** events. Sibling products never share Temporal workflow histories or call Temporal APIs across product boundaries.
+- **Services Staying Temporal-Free:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** (`stravin-webhooks`) remain permanently **Temporal-free**—communicating exclusively via synchronous gRPC/HTTP and **NATS JetStream** events.
 
 ## Alternatives Considered
 
@@ -148,6 +156,7 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
 | **Istio Ambient + Redpanda** | Sidecarless ztunnel/waypoint mesh paired with Kafka-compatible Redpanda broker. | Istio Ambient adds waypoint/control-plane complexity compared to Cilium (which also replaces the CNI and network policy engine); Redpanda carries higher operational footprint and RAM requirements than NATS JetStream for Stravin's control/event message volumes. |
 | **Apache Kafka / Amazon MSK** | Managed or self-hosted Kafka cluster for internal async event backbone. | Heavyweight broker/controller footprint in local Docker Compose (breaks fast laptop dev parity), rigid topic-per-entity partitioning compared to NATS wildcard subject routing (`stravin.core.<tenant>.<repo>.>`), and higher baseline cost. |
 | **Keeping HTTP webhooks in Core (`stravin-hook`)** | Extend Core `v1.12.x` `stravin-hook` to fan out to Review, Run, Index, Gate, and external customer URLs over HTTP. | Couples Core's availability and egress security to external internet chaos, provides no durable replay for Index backfill, and forces every product to build bespoke webhook fan-out, retry, and DLQ infrastructure. |
+| **Custom DB state machines in Run & Gate** | Hand-roll Postgres/DynamoDB state tables, polling loops, and lease timers for CI DAGs and speculative merge queues before adopting Temporal. | Reinvents durable timers, heartbeating, signal ordering, crash recovery, and history inspection poorly, creating throwaway stop-gap infrastructure that must later be rewritten under production load. |
 
 ## Consequences
 
@@ -156,32 +165,37 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
 - **Zero data-plane tax on Git traffic:** Cilium eBPF keeps `stravin-edge` -> `stravin-node` packfile streaming direct and preserves HRW cache locality.
 - **Clean product decoupling & replayability:** Adding a new internal consumer (or backfilling Index after downtime) requires only a new durable JetStream consumer, with zero producer code changes.
 - **Contained internet egress blast radius:** Isolating customer webhooks in `stravin-webhooks` keeps Core focused on Git storage and concentrates SSRF, rate-limit, and KMS signing controls in one hardened egress boundary.
-- **Future-proof orchestration without day-1 bloat:** Run and Gate can start with lightweight Go/Postgres state machines and adopt Temporal later without breaking any sibling product.
-- **High local-dev parity:** A single `nats` container + `stravin-webhooks` container in Docker Compose reproduces the exact subject hierarchy, headers, deduplication, and delivery flows used in production.
+- **Durable orchestration without throwaway state machines:** Run and Gate get crash-resilient CI DAGs, heartbeating, retries, signals, and speculative merge-queue workflows from day one on Temporal, while Core, Review, Index, and `stravin-webhooks` stay lean and Temporal-free.
+- **High local-dev parity:** A single `nats -js` container, `stravin-webhooks`, and a single `temporal server start-dev` container in Docker Compose reproduce the exact subjects, headers, deduplication, webhook delivery, and workflow execution semantics used in production.
 
 ### Negative / Trade-offs
 
-- **New stateful infrastructure dependency:** Operating NATS JetStream adds a Raft-replicated `StatefulSet` (3–5 pods + PVCs) to production Kubernetes operations, monitoring, and backup runbooks.
+- **Stateful platform infrastructure dependencies:** Production Kubernetes operations must run, monitor, and back up both a Raft-replicated **NATS JetStream** `StatefulSet` (3–5 pods + PVCs) and a **Temporal Cluster** (scoped to Run and Gate).
 - **Application-level tenancy remains mandatory:** Because Cilium authenticates workloads rather than tenants, every service must enforce `tenant_id` checks in code and contract tests (defense-in-depth, not delegated to the mesh).
 - **Two-phase migration from Core `v1.12.x`:** Core must temporarily support both legacy `stravin-hook` direct HTTP push webhooks (`v1.12.x`) and `stravin-relay` JetStream outbox publishing (`vNext`) during transition.
 
-## Migration Path (`v1.12.x` -> `vNext`)
+## Phased Adoption Plan (`v1.12.x` -> `vNext`)
 
-1. **Phase 1 — Local Dev & JetStream Addition:** Add a single `nats` container (`-js`, persistent volume) to `stravin-dev/core`'s `docker-compose.yml` alongside Floci and Valkey. Keep `v1.12.x` `stravin-hook` HTTP webhook delivery intact as the default.
-2. **Phase 2 — Core `stravin-relay` JetStream Outbox (vNext):** Rename `stravin-hook` to **`stravin-relay`** (preserving `v1.12.x` compatibility during rollout) and add the JetStream publisher sink emitting Standard Async Event Envelopes to `stravin.core.<tenant_id>.<repo_id>.ref.updated` (with `Nats-Msg-Id` = `idempotency_key` and `traceparent` header), reading from the existing DynamoDB Streams transactional outbox.
-3. **Phase 3 — Extract External Webhooks (`stravin-webhooks`):** Stand up `stravin-webhooks` subscribing to `stravin.core.>` (and later `review`, `run`, `gate`), migrating outbound customer webhook rules (`SK: WEBHOOKS`), KMS signing secrets, retries, and DLQ out of legacy `stravin-hook` so `stravin-relay` runs zero Wasm and sends zero external HTTP webhooks.
-4. **Phase 4 — Upper Product Consumers & Temporal Seam:** Build Review, Run, Index, and Gate against NATS JetStream subjects and idempotent command APIs. Introduce Temporal behind Run and Gate only when workflow complexity (multi-stage DAG retries, long-lived merge-queue bisection) justifies the operational footprint.
-5. **Phase 5 — Production Kubernetes + Cilium (TBD / Planned):** Deploy Cilium eBPF CNI with WireGuard/SPIFFE mTLS, headless `stravin-node` Service for `stravin-edge` HRW routing, and per-service `CiliumNetworkPolicy` manifests (including dedicated egress policy for `stravin-webhooks`).
+Rather than introducing all four pillars in one big-bang cutover—or building throwaway state machines—the platform adopts each pillar in four sequential phases:
 
-## Security & Local Dev Parity
+1. **Phase 1 — Core Event Relay & Bus (`stravin-relay` + NATS JetStream):** Stand up NATS JetStream (`nats -js` with a local volume in Docker Compose; 3- or 5-pod Raft `StatefulSet` + PVCs in Kubernetes) and transition `stravin-hook` (`v1.12.x`) to **`stravin-relay`**, publishing Standard Async Event Envelopes (`Nats-Msg-Id` = `idempotency_key`, W3C `traceparent`) from DynamoDB Streams onto `STRAVIN_CORE` (`stravin.core.<tenant_id>.<repo_id>.*`).
+2. **Phase 2 — External Webhooks Isolation (`stravin-webhooks`):** Stand up the dedicated **`stravin-webhooks`** service consuming internal JetStream streams with per-endpoint delivery queues, rate limits, circuit breakers, KMS HMAC-SHA256 signing, DLQ/replay, and SSRF egress isolation—removing all external HTTP webhook delivery from Core.
+3. **Phase 3 — Durable Workflow Runtime (`Temporal` for `Run` & `Gate`):** Deploy **Temporal** (`temporal server start-dev` in local Docker Compose; Temporal Cluster in Kubernetes) directly as the orchestration backbone for **Stravin Run** and **Stravin Gate**, avoiding throwaway custom state machines while keeping **Core**, **Review**, **Index**, and **`stravin-webhooks`** Temporal-free.
+4. **Phase 4 — Production Mesh & Network Policy (`Cilium` eBPF on K8s):** Enable sidecarless WireGuard/SPIFFE mTLS, headless `stravin-node` Service discovery for `stravin-edge` HRW routing, strict `CiliumNetworkPolicy` allowlists, dedicated egress policy for `stravin-webhooks`, and **Cilium Cluster Mesh** for multi-region discovery.
+
+## Security & Local Development Parity
+
+- **Daily Local Development (Docker Compose):** Runs 100% in **Docker Compose** (`stravin-dev/core` + Floci + Valkey + Grafana LGTM + single `nats -js` + `stravin-webhooks` + single `temporal server start-dev` container). No Kubernetes cluster or Cilium CNI is required for day-to-day feature, event, webhook, or Temporal workflow development.
+- **Local Kubernetes & Cilium Testing:** **OrbStack Kubernetes** works well for validating Helm charts and `StatefulSet` manifests (NATS JetStream, Temporal), but uses a fixed CNI that cannot be swapped. When testing **Cilium eBPF** or `CiliumNetworkPolicy` rules locally, use **`kind` on OrbStack** with `disableDefaultCNI: true` and install Cilium into the `kind` cluster.
 
 | Concern | Local Docker Compose (`v1.12.x` / `vNext`) | Production Kubernetes (TBD / Planned) |
 | :--- | :--- | :--- |
-| **Transport encryption & workload identity** | Direct Docker network + optional app-level TLS 1.3 mTLS (`internal/rpc/auth.go`) | Cilium eBPF transparent WireGuard + SPIFFE mTLS across all pods |
+| **Transport encryption & workload identity** | Direct Docker network + optional app-level TLS 1.3 mTLS (`internal/rpc/auth.go`); no Cilium required | Cilium eBPF transparent WireGuard + SPIFFE mTLS across all pods (test locally with `kind` on OrbStack, `disableDefaultCNI: true`) |
 | **Network segmentation** | Compose network boundaries; `STRAVIN_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` for local mock receivers | Strict `CiliumNetworkPolicy` L3/L4/L7 allowlists; `stravin-webhooks` isolated in dedicated egress namespace/policy with private-IP dial blocking enabled |
 | **Tenant authorization** | Mandatory app-level constant-time `tenant_id` check (`edge.AuthorizeTenant` + JWT/envelope validation) | Identical mandatory app-level constant-time `tenant_id` check (Cilium never replaces tenant AuthZ) |
-| **Async event backbone** | Single `nats` container with JetStream enabled and mounted volume | 3- or 5-pod Raft-replicated NATS JetStream `StatefulSet` with PVCs (`R=3`) |
-| **Trace propagation** | W3C `traceparent` across HTTP, gRPC, and NATS headers into local Grafana Tempo | Identical W3C `traceparent` propagation into production OTel collectors |
+| **Async event backbone** | Single `nats -js` container with JetStream enabled and mounted volume | 3- or 5-pod Raft-replicated NATS JetStream `StatefulSet` with PVCs (`R=3`) |
+| **Durable workflow engine (`Run` & `Gate`)** | Single `temporal` dev container (`temporal server start-dev`) | Temporal Cluster (Frontend, History, Matching, Worker + persistent DB) with separate `stravin-run` and `stravin-gate` namespaces |
+| **Trace propagation** | W3C `traceparent` across HTTP, gRPC, NATS headers, and Temporal workflow/activity headers into local Grafana Tempo | Identical W3C `traceparent` propagation into production OTel collectors |
 
 ## Related Documents
 

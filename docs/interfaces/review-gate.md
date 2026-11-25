@@ -18,7 +18,7 @@ This specification defines the contract between **Stravin Review** (pull request
 sequenceDiagram
     actor Dev as Developer / Agent
     participant Review as Stravin Review
-    participant Gate as Stravin Gate (Future Temporal Seam)
+    participant Gate as Stravin Gate (Temporal Workflows)
     participant NATS as NATS JetStream (STRAVIN_GATE / STRAVIN_REVIEW)
 
     Dev->>Review: Click "Add to Merge Queue" (single PR or stacked group)
@@ -159,7 +159,7 @@ Published to stream `STRAVIN_GATE` with `Nats-Msg-Id: <idempotency_key>` and W3C
 ### 5.2 Review -> Gate: Eligibility Invalidation Events (`STRAVIN_REVIEW` JetStream)
 
 - `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (`event_type: "review.pr.eligibility_changed"`) — Published to `STRAVIN_REVIEW` whenever a queued PR is force-pushed, converted to draft, closed, receives a "changes requested" review, or loses a required approval (and `stravin.review.<tenant_id>.<repo_id>.pr.approved` on approvals). Gate binds durable consumer `gate-review-eligibility` and evicts the affected `queue_entry_id` (and the entire `atomic_group` if stacked).
-- **Future Temporal Workflow Seam:** `POST /v1/queues/entries` and `DELETE /v1/queues/entries/{queue_entry_id}` are idempotent command boundaries, while `STRAVIN_REVIEW` invalidation events map cleanly to external workflow signals and `GET /v1/prs/{pr_id}/eligibility` maps cleanly to an idempotent activity. This lets **Stravin Gate** adopt **Temporal** internally later for its merge-queue state machine without changing Review's wire contract. **Stravin Review** stays Temporal-free.
+- **Temporal Workflow Engine (Gate Only):** **Stravin Gate** runs its speculative merge-queue batch workflows on **Temporal**: `POST /v1/queues/entries` and `DELETE /v1/queues/entries/{queue_entry_id}` start or signal queue workflows idempotently, `STRAVIN_REVIEW` invalidation events deliver external workflow signals, and `GET /v1/prs/{pr_id}/eligibility` runs as an idempotent Temporal activity. **Stravin Review** remains permanently Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -187,7 +187,7 @@ Published to stream `STRAVIN_GATE` with `Nats-Msg-Id: <idempotency_key>` and W3C
 
 ### Side B: Stravin Gate Build Checklist
 
-- [ ] Implement idempotent `POST /v1/queues/entries`, `DELETE /v1/queues/entries/{id}`, `GET /v1/queues/entries/{id}`, and `POST /v1/policies/evaluate` (Temporal command-seam ready) with constant-time `tenant_id` checks.
+- [ ] Implement idempotent `POST /v1/queues/entries`, `DELETE /v1/queues/entries/{id}`, `GET /v1/queues/entries/{id}`, and `POST /v1/policies/evaluate` (backed by Temporal merge-queue workflows and signals) with constant-time `tenant_id` checks.
 - [ ] Enforce `atomic_group: true` all-or-nothing semantics for stacked PRs.
 - [ ] Bind durable JetStream consumer `gate-review-eligibility` on `STRAVIN_REVIEW` and re-verify eligibility snapshots older than 5 minutes before executing Core `AtomicRefCAS`.
 - [ ] Publish queue outcomes to `STRAVIN_GATE` and return structured `unmet_requirements[]` and `reason_code` values for clear PR timeline feedback.

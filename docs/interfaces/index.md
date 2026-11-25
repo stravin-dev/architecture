@@ -2,7 +2,7 @@
 
 This section defines the **meet-in-the-middle interface contracts** across all five Stravin product layers (**Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, and **Stravin Gate**) plus the dedicated outbound **Stravin Webhooks** (`stravin-webhooks`) service. Each direct intersection has one dedicated specification page so teams on both sides can build independently against frozen wire formats, NATS JetStream subjects, Cilium + app-level auth boundaries, and contract-test fixtures.
 
-> **Transport & Event Architecture:** All interface contracts align with [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflow Seam](../adr/0001-platform-transport-events-webhooks.md) — **Cilium (eBPF)** sidecarless mTLS for synchronous transport, **NATS JetStream** for internal async events, **Stravin Webhooks** (`stravin-webhooks`) for outbound customer HTTP delivery, and an idempotent **Temporal** workflow seam behind **Run** and **Gate**.
+> **Transport & Event Architecture:** All interface contracts align with [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](../adr/0001-platform-transport-events-webhooks.md) — **Cilium (eBPF)** sidecarless mTLS for synchronous transport, **NATS JetStream** for internal async events, **Stravin Webhooks** (`stravin-webhooks`) for outbound customer HTTP delivery, and **Temporal** as the official durable workflow engine for **Run** and **Gate** (while **Core**, **Review**, **Index**, and **Webhooks** stay Temporal-free).
 
 ## System-Wide Product Topology
 
@@ -11,9 +11,9 @@ flowchart LR
     subgraph Mesh["Cilium eBPF Mesh (WireGuard/SPIFFE mTLS + CiliumNetworkPolicy)"]
         Core["Stravin Core\n(Git Engine, S3/DDB, Wasm Hooks)"]
         Review["Stravin Review\n(PRs, Stacked Diffs, UI)"]
-        Run["Stravin Run\n(CI Runners & Pipelines\n[Temporal Seam])"]
+        Run["Stravin Run\n(CI Runners & Pipelines\n[Temporal])"]
         Index["Stravin Index\n(Code Search & Symbols)"]
-        Gate["Stravin Gate\n(Merge Queue & Policy\n[Temporal Seam])"]
+        Gate["Stravin Gate\n(Merge Queue & Policy\n[Temporal])"]
         NATS["NATS JetStream\n(Internal Event Backbone\nstravin.<product>.<tenant>.<repo>.<event>)"]
         Webhooks["Stravin Webhooks\n(stravin-webhooks\nDedicated Egress)"]
 
@@ -45,12 +45,12 @@ Every pair of products either has a direct contract page below or stays intentio
 | # | Intersection | Primary Direction & Pattern | Core Status | Specification |
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | **Core <-> Review** | Git Smart HTTP/SSH, Git Data/Diff gRPC, `STRAVIN_CORE` JetStream push events, Wasm hooks | Wire/Hooks in Core v1.12.x; Git Data API & JetStream publisher are vNext | [Core <-> Review](core-review.md) |
-| 2 | **Core <-> Run** | Ephemeral runner clone/fetch (Valkey+S3 pack cache, `bundle-uri`), `STRAVIN_CORE` JetStream triggers, Run Temporal seam | Wire/PackCache/Hooks in Core v1.12.x; Scoped tokens, `bundle-uri` & JetStream are vNext | [Core <-> Run](core-run.md) |
+| 2 | **Core <-> Run** | Ephemeral runner clone/fetch (Valkey+S3 pack cache, `bundle-uri`), `STRAVIN_CORE` JetStream triggers, Run Temporal workflows | Wire/PackCache/Hooks in Core v1.12.x; Scoped tokens, `bundle-uri` & JetStream are vNext | [Core <-> Run](core-run.md) |
 | 3 | **Core <-> Index** | Incremental indexing + replay backfill from `STRAVIN_CORE` JetStream, pack/tree/blob reads | Wire/Hooks/META in Core v1.12.x; Object/Stream API & JetStream are vNext | [Core <-> Index](core-index.md) |
-| 4 | **Core <-> Gate** | Sync `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, `STRAVIN_CORE` drift events, Gate Temporal seam | Wasm ABI/Ref-CAS/`stravin-ctrl` in Core v1.12.x; Atomic Merge RPC & JetStream are vNext | [Core <-> Gate](core-gate.md) |
-| 5 | **Review <-> Run** | Check suites/runs via JetStream, inline annotations, live logs, idempotent re-run/cancel, Run Temporal seam | Proposed Contract (vNext) | [Review <-> Run](review-run.md) |
-| 6 | **Review <-> Gate** | Approval/policy eligibility snapshot, idempotent enqueue/dequeue API, JetStream queue feedback, Gate Temporal seam | Proposed Contract (vNext) | [Review <-> Gate](review-gate.md) |
-| 7 | **Run <-> Gate** | Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version)`, fast cancel, dual Temporal seam | Proposed Contract (vNext) | [Run <-> Gate](run-gate.md) |
+| 4 | **Core <-> Gate** | Sync `wazero` Wasm pre-receive hooks (`HookHostABI`), atomic Ref-CAS merges, `STRAVIN_CORE` drift events, Gate Temporal workflows | Wasm ABI/Ref-CAS/`stravin-ctrl` in Core v1.12.x; Atomic Merge RPC & JetStream are vNext | [Core <-> Gate](core-gate.md) |
+| 5 | **Review <-> Run** | Check suites/runs via JetStream, inline annotations, live logs, idempotent re-run/cancel, Run Temporal workflows | Proposed Contract (vNext) | [Review <-> Run](review-run.md) |
+| 6 | **Review <-> Gate** | Approval/policy eligibility snapshot, idempotent enqueue/dequeue API, JetStream queue feedback, Gate Temporal workflows | Proposed Contract (vNext) | [Review <-> Gate](review-gate.md) |
+| 7 | **Run <-> Gate** | Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version)`, fast cancel, Run & Gate Temporal workflows | Proposed Contract (vNext) | [Run <-> Gate](run-gate.md) |
 | 8 | **Review <-> Index** | PR diff code intelligence (go-to-def, find-refs, hover, cross-repo callers) over Cilium mTLS with lag fallback | Proposed Contract (vNext) | [Review <-> Index](review-index.md) |
 | 9 | **Platform Events <-> External Webhooks** | `stravin-webhooks` subscribing to `stravin.*.>` JetStream streams for outbound customer HTTPS delivery, KMS HMAC-SHA256 signing, SSRF isolation, DLQ/replay | Direct HTTP webhooks in Core v1.12.x; Dedicated `stravin-webhooks` service is vNext | [External Webhooks](external-webhooks.md) |
 
@@ -63,7 +63,7 @@ Two of the ten possible product pairs have **no direct runtime interface**:
 
 ## Shared Platform Contract Conventions
 
-All nine interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal seam rules, and evolution policies below.
+All nine interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal workflow boundaries, and evolution policies below.
 
 ### Canonical Identifiers
 
@@ -134,10 +134,10 @@ Headers:
 
 - **Delivery & Deduplication:** At-least-once delivery via durable pull/push consumers with server-side `Nats-Msg-Id` deduplication (mapped 1:1 to `idempotency_key`), configurable `AckWait` + backoff redelivery, and DLQ advisory capture on `MaxDeliver` exhaustion. Consumers MUST still enforce idempotency on `idempotency_key` (or `event_id`).
 
-### Future Durable Workflow Seam (Temporal)
+### Durable Workflow Engine (Temporal)
 
-- **Scope:** **Stravin Run** (multi-step CI DAGs, fan-out/fan-in, cancellations, timeouts) and **Stravin Gate** (speculative merge-queue batch state machines, rebase/cancel/promote loops) expose **idempotent command/activity APIs** (`Idempotency-Key`, explicit cancel and status-read endpoints) and **NATS JetStream** events so **Temporal** can be adopted internally behind Run and Gate later with zero cross-product wire-contract changes.
-- **Temporal-Free Services:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** remain Temporal-free.
+- **Official Scope (Run & Gate):** **Temporal** is the official durable workflow engine for **Stravin Run** (CI pipeline DAG workflows, fan-out/fan-in, heartbeating, retries, cancellations, timeouts) and **Stravin Gate** (speculative merge-queue batch workflows, enqueue/dequeue/verdict signals, atomic Ref-CAS merge activities). Neither service builds throwaway custom state machines. Both still expose **idempotent command/query APIs** (`Idempotency-Key`, explicit cancel and status-read endpoints) and **NATS JetStream** events so sibling products remain decoupled from Temporal internals and never share workflow histories.
+- **Temporal-Free Services:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** (`stravin-webhooks`) remain permanently Temporal-free (synchronous gRPC/HTTP + NATS JetStream events only).
 
 ### Compatibility, Versioning & Error Contract
 

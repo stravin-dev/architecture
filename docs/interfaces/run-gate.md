@@ -16,9 +16,9 @@ This specification defines the contract between **Stravin Run** (CI runners and 
 
 ```mermaid
 sequenceDiagram
-    participant Gate as Stravin Gate (Future Temporal Seam)
+    participant Gate as Stravin Gate (Temporal Workflows)
     participant Core as Stravin Core
-    participant Run as Stravin Run (Future Temporal Seam)
+    participant Run as Stravin Run (Temporal Workflows)
     participant NATS as NATS JetStream (STRAVIN_RUN)
 
     Gate->>Core: ComputeMergeTree -> refs/stravin/gate/main/qe_01... (commit_oid, tree_oid)
@@ -141,7 +141,7 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 }
 ```
 
-- **Dual Temporal Workflow Seam:** Both **Stravin Run** and **Stravin Gate** sit at the platform's future **Temporal** boundary. Because `POST /v1/gate-builds` and `/cancel` are idempotent commands (with `Idempotency-Key`), `GET /v1/gate-builds/{batch_run_id}` provides reconciliation reads, and verdicts flow asynchronously over `STRAVIN_RUN` JetStream, **Run** (multi-step CI DAGs, fan-out/fan-in, timeouts) and **Gate** (speculative batch bisection, rebase/cancel/promote loops) can each independently adopt or upgrade Temporal behind their own service boundary without ever coupling workflow histories or changing this wire contract.
+- **Independent Temporal Workflow Engines:** Both **Stravin Run** and **Stravin Gate** run on **Temporal** behind their own service boundaries without ever coupling workflow histories. **Gate**'s speculative merge-queue workflow invokes `POST /v1/gate-builds` and `/cancel` as idempotent Temporal activities (with `Idempotency-Key`), polls `GET /v1/gate-builds/{batch_run_id}` for reconciliation, and receives `STRAVIN_RUN` JetStream verdict events as workflow signals; **Run** maps those commands to its own Temporal CI pipeline DAG workflows (fan-out/fan-in, heartbeating, retries, timeouts, and fast cancellation).
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -163,14 +163,14 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 ### Side A: Stravin Run Build Checklist
 
-- [ ] Implement idempotent `POST /v1/gate-builds`, `POST /v1/gate-builds/{id}/cancel`, and `GET /v1/gate-builds/{id}` (Temporal workflow-seam ready) with app-level `tenant_id` check.
+- [ ] Implement idempotent `POST /v1/gate-builds`, `POST /v1/gate-builds/{id}/cancel`, and `GET /v1/gate-builds/{id}` (backed by Temporal CI DAG workflows) with app-level `tenant_id` check.
 - [ ] Publish `stravin.run.<tenant_id>.<repo_id>.gate_check.completed` and `gate_verdict.ready` to `STRAVIN_RUN` JetStream with `Nats-Msg-Id` and `traceparent` immediately on individual failures for fail-fast eviction.
 - [ ] Support `tree_oid` verdict reuse strictly scoped to `(tenant_id, repo_id, tree_oid, check_name)` and gated by `allow_tree_oid_reuse`.
 - [ ] Distinguish `infra_error` from `failure` in conclusions.
 
 ### Side B: Stravin Gate Build Checklist
 
-- [ ] Bind every speculative build request and verdict verification to `(tree_oid, commit_oid, policy_version)` with deterministic `Idempotency-Key`s (Temporal activity-safe).
+- [ ] Bind every speculative build request and verdict verification to `(tree_oid, commit_oid, policy_version)` with deterministic `Idempotency-Key`s in Gate's Temporal activities.
 - [ ] Bind durable JetStream consumer `gate-run-verdicts` on `STRAVIN_RUN` and call `/cancel` immediately whenever an entry is evicted or a speculative chain resets.
 - [ ] Poll `GET /v1/gate-builds/{batch_run_id}` as a staleness backstop for active queue entries.
 - [ ] Requeue (rather than evict) on `INFRA_ERROR` up to the configured retry budget.
