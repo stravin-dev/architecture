@@ -29,7 +29,7 @@ flowchart LR
 
     subgraph LGTM["Observability (LGTM)"]
         OTel["OTel Collector :4317"]
-        Grafana["Grafana :3000\nstravin-loadgen <-> stravin-core"]
+        Grafana["Grafana :3000\nstravin-loadgen ⟷ stravin-core"]
     end
 
     Loadgen -->|"Smart HTTP / SSH"| PHTTP

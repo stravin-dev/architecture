@@ -1,4 +1,4 @@
-# Stravin Core <-> Stravin Run
+# Stravin Core ⟷ Stravin Run
 
 This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Run** (ephemeral CI build/test runners and pipeline scheduler).
 

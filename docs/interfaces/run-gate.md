@@ -1,4 +1,4 @@
-# Stravin Run <-> Stravin Gate
+# Stravin Run ⟷ Stravin Gate
 
 This specification defines the contract between **Stravin Run** (CI runners and pipeline execution) and **Stravin Gate** (speculative merge queues and merge policy).
 

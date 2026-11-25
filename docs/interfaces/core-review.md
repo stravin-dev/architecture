@@ -1,4 +1,4 @@
-# Stravin Core <-> Stravin Review
+# Stravin Core ⟷ Stravin Review
 
 This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Review** (pull requests, stacked diffs, inline review, and repository browser).
 

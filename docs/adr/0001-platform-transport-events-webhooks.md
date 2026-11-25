@@ -202,5 +202,5 @@ Rather than introducing all four pillars in one big-bang cutover—or building t
 - [Product-Stack Interface Overview & Matrix](../interfaces/index.md) — System topology, intersection matrix, and shared contract conventions.
 - [External Webhooks Interface](../interfaces/external-webhooks.md) — Full meet-in-the-middle contract for `stravin-webhooks`.
 - [Server-Side Hooks](../core/hooks.md) — Core `v1.12.x` three-tier hook architecture and `vNext` JetStream evolution.
-- [Core <-> Review](../interfaces/core-review.md), [Core <-> Run](../interfaces/core-run.md), [Core <-> Index](../interfaces/core-index.md), [Core <-> Gate](../interfaces/core-gate.md) — Core product intersections.
-- [Review <-> Run](../interfaces/review-run.md), [Review <-> Gate](../interfaces/review-gate.md), [Run <-> Gate](../interfaces/run-gate.md), [Review <-> Index](../interfaces/review-index.md) — Upper-layer product intersections.
+- [Core ⟷ Review](../interfaces/core-review.md), [Core ⟷ Run](../interfaces/core-run.md), [Core ⟷ Index](../interfaces/core-index.md), [Core ⟷ Gate](../interfaces/core-gate.md) — Core product intersections.
+- [Review ⟷ Run](../interfaces/review-run.md), [Review ⟷ Gate](../interfaces/review-gate.md), [Run ⟷ Gate](../interfaces/run-gate.md), [Review ⟷ Index](../interfaces/review-index.md) — Upper-layer product intersections.

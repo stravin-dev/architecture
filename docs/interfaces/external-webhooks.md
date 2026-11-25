@@ -1,4 +1,4 @@
-# Platform Events <-> Stravin External Webhooks
+# Platform Events ⟷ Stravin External Webhooks
 
 This specification defines the meet-in-the-middle contract between internal **NATS JetStream Platform Events** (emitted by **Stravin Core**, **Stravin Review**, **Stravin Run**, and **Stravin Gate**) and **Stravin Webhooks** (`stravin-webhooks`), the dedicated outbound customer and third-party HTTP webhook delivery service.
 
