@@ -18,7 +18,7 @@ This specification defines the contract between **Stravin Review** (pull request
 sequenceDiagram
     actor Dev as Developer / Reviewer
     participant Review as Stravin Review
-    participant Run as Stravin Run (Future Temporal Seam)
+    participant Run as Stravin Run (Temporal Workflows)
     participant NATS as NATS JetStream (STRAVIN_RUN)
 
     Dev->>Review: Open or update PR (head_oid, tree_oid, stack_parent_pr_id)
@@ -158,7 +158,7 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 ```
 
 - **Consumer & Ordering Rule:** Review binds durable pull consumer `review-run-checks` on `STRAVIN_RUN` (`stravin.run.*.*.check_suite.updated`, `stravin.run.*.*.check_run.updated`, `stravin.run.*.*.check.completed`). Review applies updates monotonically by `(run_id, attempt, status_rank)` where `queued < in_progress < completed|cancelled`, ignoring stale out-of-order deliveries.
-- **Future Temporal Workflow Seam:** `POST /v1/check-suites`, `/rerun`, and `/cancel` act as idempotent command boundaries (keyed by `Idempotency-Key` and `check_suite_id`), while `STRAVIN_RUN` JetStream events carry state transitions outward. This allows **Stravin Run** to adopt **Temporal** internally later for multi-step CI DAGs, fan-out/fan-in, cancellations, and timeouts with zero wire changes to Review. **Stravin Review** stays Temporal-free.
+- **Temporal Workflow Engine (Run Only):** `POST /v1/check-suites`, `/rerun`, and `/cancel` act as idempotent command boundaries (keyed by `Idempotency-Key` and `check_suite_id`) that start or signal **Stravin Run**'s **Temporal** CI pipeline DAG workflows (handling fan-out/fan-in, runner heartbeating, retries, cancellations, and timeouts), while `STRAVIN_RUN` JetStream events carry state transitions outward. **Stravin Review** remains permanently Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -186,7 +186,7 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 
 ### Side B: Stravin Run Build Checklist
 
-- [ ] Honor `Idempotency-Key` on `POST /v1/check-suites`, `/rerun`, and `/cancel` (Temporal workflow-command ready) so Review retries never spawn duplicate suites.
+- [ ] Honor `Idempotency-Key` on `POST /v1/check-suites`, `/rerun`, and `/cancel` (starting/signaling Temporal CI DAG workflows) so Review retries never spawn duplicate suites.
 - [ ] Publish `run.check_suite.updated` and `run.check_run.updated` / `check.completed` to `STRAVIN_RUN` JetStream with `Nats-Msg-Id`, `traceparent`, `commit_oid`, `tree_oid`, and `inherited_from_run_id`.
 - [ ] Enforce the 50/batch and 1,000/run annotation caps before calling Review.
 - [ ] Validate `actor_id` RBAC and constant-time `tenant_id` on `rerun` and `cancel` endpoints.

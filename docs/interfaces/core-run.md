@@ -18,7 +18,7 @@ sequenceDiagram
     participant Node as Stravin Core (stravin-node)
     participant Relay as Stravin Core (stravin-relay)
     participant NATS as NATS JetStream (STRAVIN_CORE)
-    participant Run as Stravin Run (Scheduler / Future Temporal Seam)
+    participant Run as Stravin Run (Temporal Workflows)
     participant Runner as Stravin Run (Ephemeral Runner)
     participant Edge as Stravin Core (stravin-edge)
     participant Cache as Valkey + S3 Pack Cache / Bundle
@@ -112,7 +112,7 @@ Response (`200 OK`):
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently dispatches flat signed HTTP `POST` webhooks (`X-Stravin-Event: push`, `X-Stravin-Signature-256`, `traceparent`) for every `RH#s` INSERT matching the repo's configured `ref_glob` (e.g., `refs/heads/*`, `refs/tags/*`).
 - **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes Standard Async Event Envelopes to stream `STRAVIN_CORE` on subject `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` in NATS headers. The payload includes `data.prev_oid`, `data.ulid`, `data.object_format`, and `data.deleted` (true when `oid` is zero OID) so Run can distinguish tag creation, branch deletion (cancelling superseded runs), and force-pushes without an extra round-trip.
-- **Durable Consumer & Future Temporal Seam:** Run binds durable pull consumer `run-core-triggers` on `stravin.core.*.*.ref.updated`. Trigger ingestion maps each unique `idempotency_key` to a single idempotent pipeline start command (future **Temporal** workflow start with `WorkflowID = <tenant_id>:<repo_id>:<commit_oid>:<workflow>`), keeping Core completely decoupled from Run's internal orchestration engine.
+- **Durable Consumer & Temporal Workflows:** Run binds durable pull consumer `run-core-triggers` on `stravin.core.*.*.ref.updated`. Trigger ingestion maps each unique `idempotency_key` to an idempotent **Temporal** pipeline workflow start (`WorkflowID = <tenant_id>:<repo_id>:<commit_oid>:<workflow>`), driving CI DAG fan-out/fan-in, runner heartbeating, retries, and cancellation while keeping **Stravin Core** completely Temporal-free and decoupled from Run's internal workflow engine.
 - **Workflow File Fetch:** Run fetches `.stravin/workflows/*.yaml` at the exact `commit_oid` (via `git archive`/shallow fetch today, or `GitData.StreamBlob` in vNext) before scheduling jobs.
 
 ## 6. Shared Data Contracts & Identifiers
@@ -142,7 +142,7 @@ Response (`200 OK`):
 ### Side B: Stravin Run Build Checklist
 
 - [ ] Configure all runners with `protocol.version=2`, exact `commit_oid` fetches, and `traceparent` propagation.
-- [ ] Bind durable JetStream consumer `run-core-triggers` on `STRAVIN_CORE` and deduplicate triggers by `idempotency_key` (idempotent workflow-start boundary ready for Temporal).
+- [ ] Bind durable JetStream consumer `run-core-triggers` on `STRAVIN_CORE` and deduplicate triggers by `idempotency_key` when starting idempotent Temporal pipeline workflows.
 - [ ] Classify `429`/`5xx` checkout failures as retryable `INFRA_ERROR`, distinct from user build failures.
 - [ ] Never pass AWS storage credentials into runner sandboxes; use only scoped HTTP Git tokens and enforce strict runner egress `CiliumNetworkPolicy`.
 

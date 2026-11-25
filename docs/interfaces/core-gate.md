@@ -15,7 +15,7 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 
 ```mermaid
 sequenceDiagram
-    participant Gate as Stravin Gate
+    participant Gate as Stravin Gate (Temporal Workflows)
     participant Admin as Stravin Core (admin / S3 + DDB)
     participant Node as Stravin Core (stravin-node)
     participant Ctrl as Stravin Core (stravin-ctrl)
@@ -120,7 +120,7 @@ message RefTransition {
 
 - **Implemented in Core v1.12.x (`internal/hooks/async/dispatcher.go`):** `stravin-hook` currently emits flat signed HTTP `push` webhooks for protected branches (`refs/heads/main`, etc.).
 - **Proposed Core Extension (vNext — NATS JetStream):** `stravin-relay` (renamed from `stravin-hook` in `vNext`) publishes to `STRAVIN_CORE` on `stravin.core.<tenant_id>.<repo_id>.ref.updated` with `Nats-Msg-Id: <idempotency_key>` and W3C `traceparent` headers. Gate binds durable pull consumer `gate-core-drift` on `stravin.core.*.*.ref.updated`.
-- **Why Gate Subscribes & Future Temporal Seam:** If an authorized bypass push (e.g., break-glass admin push) or a `stravin-ctrl` failover rewind mutates `refs/heads/main` out-of-band, Gate receives `core.ref.updated` with `(ref, oid, prev_oid, epoch)`, immediately invalidates in-flight speculative queue entries built on the stale base, and rebuilds the speculative chain from the new `oid`. Because `ComputeMergeTree` and `AtomicRefCAS` are strictly idempotent (keyed by `idempotency_key` and fenced by `old_oid` + `expected_epoch`) and drift arrives as JetStream events, Gate can later adopt **Temporal** internally to drive its speculative rebase/cancel/promote state machine (signaling the queue workflow on `core.ref.updated` and calling `GateOps` as idempotent activities) without changing Core's wire contract. Core itself remains Temporal-free.
+- **Why Gate Subscribes & Temporal Workflows:** If an authorized bypass push (e.g., break-glass admin push) or a `stravin-ctrl` failover rewind mutates `refs/heads/main` out-of-band, Gate receives `core.ref.updated` with `(ref, oid, prev_oid, epoch)` and delivers a signal to its active **Temporal** merge-queue workflow, which immediately invalidates in-flight speculative queue entries built on the stale base and rebuilds the speculative chain from the new `oid`. Gate executes `GateOps` (`ComputeMergeTree`, `AtomicRefCAS`) as idempotent Temporal activities fenced by `idempotency_key`, `old_oid`, and `expected_epoch`. **Stravin Core** remains permanently Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
@@ -149,7 +149,7 @@ message RefTransition {
 ### Side B: Stravin Gate Build Checklist
 
 - [ ] Compile branch-protection rules into deterministic, zero-I/O Wasm modules targeting `"stravin"` `HookHostABI` v2 (`*_v2` exports for SHA-1 and SHA-256).
-- [ ] Fence all merges with `expected_epoch`, pass deterministic `idempotency_key`s (Temporal activity-safe), and bind durable JetStream consumer `gate-core-drift` on `STRAVIN_CORE`.
+- [ ] Fence all merges with `expected_epoch`, execute `GateOps` as idempotent Temporal activities with deterministic `idempotency_key`s, and bind durable JetStream consumer `gate-core-drift` on `STRAVIN_CORE` to signal queue workflows on drift.
 - [ ] Isolate all speculative refs under `refs/stravin/gate/*` and garbage-collect them on merge or eviction.
 - [ ] Enforce `len(updates) <= 45` per atomic transaction.
 
