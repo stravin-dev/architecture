@@ -1,4 +1,4 @@
-# Stravin Review <-> Stravin Index
+# Stravin Review ⟷ Stravin Index
 
 This specification defines the contract between **Stravin Review** (PR diff viewer and repository browser) and **Stravin Index** (trigram search, AST symbol navigation, and cross-repository reference graphs).
 
@@ -114,7 +114,7 @@ message LocationsResponse {
 
 ### 5.1 Review -> Index: Priority On-Demand Indexing Hint (`STRAVIN_REVIEW` JetStream, Optional)
 
-By default, Stravin Index indexes `default_branch` and configured long-lived branches driven by Core's `STRAVIN_CORE` JetStream events (see [Core <-> Index](core-index.md)). To give active PRs exact symbol navigation without indexing every ephemeral branch in the org:
+By default, Stravin Index indexes `default_branch` and configured long-lived branches driven by Core's `STRAVIN_CORE` JetStream events (see [Core ⟷ Index](core-index.md)). To give active PRs exact symbol navigation without indexing every ephemeral branch in the org:
 
 - Review publishes `stravin.review.<tenant_id>.<repo_id>.pr.opened_or_updated` (`event_type: "review.pr.opened_or_updated"`, `Nats-Msg-Id`, `traceparent`) to `STRAVIN_REVIEW` carrying `{tenant_id, repo_id, pr_id, head_oid, base_oid, changed_paths[]}` as a **best-effort priority hint**.
 - Index binds durable consumer `index-review-hints` on `stravin.review.*.*.pr.opened_or_updated` and may compute an overlay symbol delta for `changed_paths[]` on `head_oid` (TTL 24 hours). If Index drops or lags on the hint, `CodeIntel` falls back cleanly to `fallback_commit_oid` (`base_oid`) or `INDEX_FRESHNESS_UNINDEXED`. Both Review and Index stay Temporal-free.

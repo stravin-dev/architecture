@@ -1,4 +1,4 @@
-# Stravin Review <-> Stravin Gate
+# Stravin Review ⟷ Stravin Gate
 
 This specification defines the contract between **Stravin Review** (pull requests, approvals, stacked diffs) and **Stravin Gate** (serialized merge queues, branch protection, and policy enforcement).
 

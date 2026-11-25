@@ -1,4 +1,4 @@
-# Stravin Review <-> Stravin Run
+# Stravin Review ⟷ Stravin Run
 
 This specification defines the contract between **Stravin Review** (pull requests, stacked diffs, inline review) and **Stravin Run** (ephemeral CI runners and pipelines).
 

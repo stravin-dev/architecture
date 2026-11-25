@@ -1,4 +1,4 @@
-# Stravin Core <-> Stravin Gate
+# Stravin Core ⟷ Stravin Gate
 
 This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Gate** (serialized merge queues, branch protection, policy checks, and agent guardrails).
 

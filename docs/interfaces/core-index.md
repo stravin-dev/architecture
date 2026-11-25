@@ -1,4 +1,4 @@
-# Stravin Core <-> Stravin Index
+# Stravin Core ⟷ Stravin Index
 
 This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Index** (trigram full-text search, symbol navigation, and cross-repository dependency graphs).
 
