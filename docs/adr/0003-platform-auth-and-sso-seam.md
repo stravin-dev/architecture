@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-26
-- **Scope:** Platform identity, authentication, Security Token Service (STS), coarse org/repo RBAC, Valkey `jti` revocation, and pluggable enterprise SSO (`OIDC`, `SCIM 2.0`, future `SAML 2.0`) across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, **Stravin Webhooks**, and **Stravin Notify**.
+- **Scope:** Platform identity, authentication, Security Token Service (STS), coarse org/repo RBAC, Valkey `jti` revocation, and pluggable enterprise SSO & directory sync (`OIDC`, `SCIM 2.0`, optional `WorkOS` adapter, future `SAML 2.0`) across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, **Stravin Webhooks**, and **Stravin Notify**.
 
 ## Context
 
@@ -23,25 +23,30 @@ As Stravin scales from local Docker Compose and single-tenant self-hosted deploy
 We introduce **`stravin-auth`** (Stravin Auth) as the dedicated, **Temporal-free** Platform IAM, Authentication, and STS service with four architectural pillars:
 
 1. **Standalone First (Zero External IdP Required)**
-2. **Pluggable SSO Add-On Seam (`IdentityProvider` interface: Phase 1 OIDC + SCIM 2.0; Future SAML 2.0)**
+2. **Two Pluggable Enterprise Seams (`IdentityProvider` for Login + `DirectorySyncAdapter` for Provisioning/Deprovisioning, including Optional WorkOS Adapter)**
 3. **Strictly Off the Synchronous Hot Path (Local JWKS + Valkey `jti` Deny-List)**
 4. **Mandatory Security Hardening Invariants & Local Dev Parity**
 
 ```mermaid
 flowchart TB
-    subgraph ExternalIdPs["External Enterprise IdPs (Optional Add-On)"]
-        OIDCIdP["Phase 1: OIDC IdP\n(Auth Code + PKCE, Pinned Issuer)"]
-        SCIMClient["Phase 1: SCIM 2.0 Provisioner\n(/scim/v2/Users, /scim/v2/Groups)"]
-        SAMLIdP["Future: SAML 2.0 IdP\n(XML Signature ACS)"]
+    subgraph ExternalIdPs["External Enterprise IdPs & Directory Sync (Optional Add-On)"]
+        OIDCIdP["Phase 1: Native OIDC IdP\n(Auth Code + PKCE, Pinned Issuer)"]
+        WorkOSSSO["Optional: WorkOS SSO Broker\n(workos.com, Managed SaaS)"]
+        SAMLIdP["Future: Native SAML 2.0 IdP\n(XML Signature ACS)"]
+        SCIMClient["Phase 1: Native SCIM 2.0\n(/scim/v2/Users, /scim/v2/Groups)"]
+        WorkOSDirSync["Optional: WorkOS Directory Sync\n(Signed dsync.user.* / dsync.group.* Webhooks)"]
     end
 
-    subgraph AuthService["Stravin Auth (stravin-auth) [Temporal-Free]"]
+    subgraph AuthService["Stravin Auth (stravin-auth) — Sole Token Issuer [Temporal-Free]"]
         direction TB
         Standalone["Standalone Auth Store\n(Passkeys/WebAuthn, Argon2id,\nSSH Keys, PATs, Coarse Org/Repo RBAC)"]
         IdPSeam["IdentityProvider Seam\nCanonical Assertion:\n(tenant_id, idp_id, external_sub,\nemail, email_verified, groups)"]
-        OIDCApps["External OIDC Apps & STS\n(ADR-0002 App Registrations,\nService/User/Git JWT Minting)"]
-        SafeDialer["SSRF-Hardened Egress Dialer\n(Discovery / JWKS Refresh)"]
+        DirSyncSeam["DirectorySyncAdapter Seam\nNormalized Pipeline:\n(UpsertUser, DeactivateUser,\nSyncGroup, RemoveGroupMember)"]
+        OIDCApps["External OIDC Apps & STS\n(ADR-0002 App Registrations,\nSole Service/User/Git JWT Minter)"]
+        SafeDialer["SSRF-Hardened Egress Dialer\n(Discovery / JWKS / Broker API)"]
         IdPSeam --> OIDCApps
+        DirSyncSeam --> Standalone
+        DirSyncSeam --> OIDCApps
         Standalone --> OIDCApps
         IdPSeam -.-> SafeDialer
     end
@@ -57,9 +62,12 @@ flowchart TB
     end
 
     OIDCIdP -->|"Auth Code + PKCE"| IdPSeam
-    SCIMClient -->|"Scoped Bearer Token"| Standalone
+    WorkOSSSO -.->|"Optional Broker Adapter"| IdPSeam
     SAMLIdP -.->|"Same Seam (Future)"| IdPSeam
+    SCIMClient -->|"Scoped Bearer Token"| DirSyncSeam
+    WorkOSDirSync -.->|"HMAC-Signed Webhook"| DirSyncSeam
     SafeDialer -.->|"Safe HTTPS (No Private CIDRs)"| OIDCIdP
+    SafeDialer -.->|"Safe HTTPS"| WorkOSSSO
 
     OIDCApps -->|"Push Revoked jti"| Valkey
     OIDCApps -->|"Publish principal.revoked / role_changed / security.alert"| NATS
@@ -83,9 +91,13 @@ flowchart TB
 - **Valkey `jti` Revocation Deny-List:** Shared low-latency revocation store keyed by `(tenant_id, jti)` with TTL matching the token's remaining lifetime.
 - **Coarse Org/Repo RBAC:** Authoritative mapping of `(principal, tenant_id, repo_id, role/scopes)` across canonical roles (`owner`, `admin`, `maintainer`, `write`, `read`) and fine-grained scopes.
 
-### 2. Pluggable SSO Add-On Seam (`IdentityProvider` Interface)
+### 2. Pluggable Enterprise Seams (`IdentityProvider` + `DirectorySyncAdapter`)
 
-All external enterprise identity protocols plug behind a single internal `IdentityProvider` adapter interface inside `stravin-auth`. Every adapter normalizes its protocol-specific assertion into one canonical struct:
+All external enterprise identity and provisioning protocols plug behind **two** internal adapter seams inside `stravin-auth`. Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`, `Notify`) consumes only `stravin-auth`-minted JWTs and `STRAVIN_AUTH` JetStream events, **zero IdP- or broker-specific code exists outside `stravin-auth`**:
+
+#### 2.1 `IdentityProvider` Seam (Login)
+
+Every login adapter normalizes its protocol-specific assertion into one canonical struct:
 
 ```text
 ExternalIdentityAssertion {
@@ -98,13 +110,23 @@ ExternalIdentityAssertion {
 }
 ```
 
-Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`, `Notify`) consumes only `stravin-auth`-minted JWTs and `STRAVIN_AUTH` JetStream events, **zero IdP-specific code exists outside `stravin-auth`**:
+- **Phase 1 — Native `oidc`:** Authorization Code flow with PKCE (`S256`), strict `state` and `nonce` binding, pinned issuer URL (`iss`), and an SSRF-hardened discovery/JWKS HTTP client enforcing the same private-CIDR, loopback, link-local (`169.254.169.254`), and DNS-rebinding blocks defined in [ADR-0002](0002-external-runner-seam-and-oidc-auth.md).
+- **Optional — `workos` Broker Adapter (`workos.com`):** Managed SaaS deployments may enable an optional WorkOS SSO adapter behind `IdentityProvider` to accelerate multi-IdP enterprise onboarding (Okta, Entra ID, Google Workspace, SAML/OIDC) without building per-IdP edge-case parsers on day one. The adapter exchanges the WorkOS authorization code for the user profile and emits the identical `ExternalIdentityAssertion`.
+- **Future — Native `saml`:** Plugs into the exact same `IdentityProvider` seam: Assertion Consumer Service (ACS) validates XML signatures against the tenant's pinned IdP X.509 certificate, enforces assertion ID replay protection, and emits the identical `ExternalIdentityAssertion` -> same JWT minting pipeline, with **zero downstream product changes**.
 
-- **Phase 1 SSO Add-On (OIDC + SCIM 2.0):**
-    - **OIDC:** Authorization Code flow with PKCE (`S256`), strict `state` and `nonce` binding, pinned issuer URL (`iss`), and an SSRF-hardened discovery/JWKS HTTP client enforcing the same private-CIDR, loopback, link-local (`169.254.169.254`), and DNS-rebinding blocks defined in [ADR-0002](0002-external-runner-seam-and-oidc-auth.md).
-    - **SCIM 2.0:** `/scim/v2/Users` and `/scim/v2/Groups` endpoints authenticated by a per-tenant scoped bearer token (hashed at rest, rotatable), driving deterministic group-to-role mapping and instant user deprovisioning.
-- **Future SSO Add-On (SAML 2.0):**
-    - Plugs into the exact same `IdentityProvider` seam: Assertion Consumer Service (ACS) validates XML signatures against the tenant's pinned IdP X.509 certificate, enforces assertion ID replay protection, and emits the identical `ExternalIdentityAssertion` -> same JWT minting + same SCIM 2.0 provisioning pipeline, with **zero downstream product changes**.
+#### 2.2 `DirectorySyncAdapter` Seam (Provisioning & Deprovisioning)
+
+Every external directory sync source plugs behind `DirectorySyncAdapter` and normalizes incoming mutations into the exact same internal provisioning pipeline (`UpsertUser`, `DeactivateUser`, `SyncGroup`, `RemoveGroupMember`):
+
+- **Native SCIM 2.0 (Phase 1):** `/scim/v2/Users` and `/scim/v2/Groups` endpoints authenticated by a per-tenant scoped bearer token (hashed at rest, rotatable), driving deterministic group-to-role mapping and instant user deprovisioning.
+- **Optional WorkOS Directory Sync (`workos.com`):** Signed `dsync.user.*` and `dsync.group.*` webhook ingestion (`POST /v1/auth/dsync/workos/webhooks`) verified via HMAC-SHA256 signature and timestamp replay window checks.
+- **Identical Downstream Pipeline:** Both native SCIM 2.0 and WorkOS Directory Sync feed the exact same internal `UpsertUser` / `DeactivateUser` / `SyncGroup` / `RemoveGroupMember` handlers, which synchronously revoke active sessions, write Valkey `jti` deny-list / `rev_epoch` entries, and publish `STRAVIN_AUTH` JetStream `principal.revoked` and `principal.role_changed` events.
+
+#### 2.3 Zero Vendor Lock-In / Sole Token Issuer Invariant
+
+- **`stravin-auth` Is the Sole Token Issuer:** `stravin-auth` remains the exclusive owner of `/.well-known/jwks.json`, internal service JWTs, `commit_oid`-pinned Git tokens, PATs, SSH keys, OIDC Apps, Valkey `jti` deny-lists, and coarse org/repo RBAC. **WorkOS NEVER mints tokens accepted by Core, Review, Run, Index, Gate, Webhooks, or Notify.**
+- **Zero SaaS Dependency for Self-Hosted & Local Dev:** Self-hosted and local Docker Compose environments run standalone or native OIDC + SCIM 2.0 with zero WorkOS account, SDK runtime requirement, or outbound SaaS dependency.
+- **Lossless Adapter Swapping:** Swapping a tenant between WorkOS and native OIDC/SAML + SCIM 2.0 updates only the tenant's `IdentityProvider` / `DirectorySyncAdapter` configuration inside `stravin-auth`, preserving `principal_id` and all RBAC bindings without touching any downstream product.
 
 ### 3. Strictly Off the Synchronous Hot Path (Critical Invariant)
 
@@ -121,8 +143,8 @@ Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Web
 1. **No Auto-Linking to Unverified Emails (Account Takeover Prevention):**
     - `stravin-auth` MUST NEVER automatically link an incoming `ExternalIdentityAssertion` to an existing local account solely by matching `email` when `email_verified` is `false` or when the local account's email is unverified.
     - Linking an SSO identity to a pre-existing local account requires either an existing `(tenant_id, idp_id, external_sub)` binding or an explicit authenticated account-linking flow where the user proves control of both identities.
-2. **Instant SCIM Deprovisioning & Revocation Propagation:**
-    - On SCIM user deactivation (`active: false`), deletion (`DELETE /scim/v2/Users/{id}`), admin suspension, or role downgrade, `stravin-auth` MUST synchronously:
+2. **Instant Directory Sync Deprovisioning & Revocation Propagation:**
+    - On any `DirectorySyncAdapter` `DeactivateUser` event—whether native SCIM (`active: false` or `DELETE /scim/v2/Users/{id}`) or WorkOS Directory Sync (`dsync.user.deleted`)—as well as admin suspension or role downgrade, `stravin-auth` MUST synchronously:
         1. Revoke all active web sessions and mark the principal suspended (blocking all PAT and SSH key resolution).
         2. Push all active revocable `jti` values (or principal revocation epoch) into the Valkey `jti` deny-list.
         3. Publish `stravin.auth.<tenant_id>.principal.revoked` (or `principal.role_changed`) onto NATS JetStream (`STRAVIN_AUTH`) so `stravin-edge`, Review, Run, Index, Gate, Webhooks, and Notify drop cached permissions and active streams within seconds.
@@ -142,6 +164,7 @@ Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Web
 | **Synchronous auth sidecar / `ext_authz` on every request** | Call `stravin-auth` synchronously on every `stravin-edge` Git push/fetch and internal product RPC. | Adds network latency and a hard availability dependency to Core's 256 MiB Git hot path; unnecessary when Ed25519/ES256 JWKS verification + Valkey `jti` checks execute locally in sub-millisecond time. |
 | **Embed OIDC/SAML/SCIM directly into Review or Core** | Put user login and enterprise SSO inside Review, and keep separate static auth in Core. | Splits identity truth across products, forces duplicated token minting and revocation logic, and leaks IdP protocol parsing into domain services. |
 | **Push user/tenant RBAC into Cilium eBPF** | Encode tenant or user permissions into Cilium identities and `CiliumNetworkPolicy` rules. | Violates Cilium's workload-identity boundary ([ADR-0001](0001-platform-transport-events-webhooks.md)), explodes eBPF policy cardinality per user/repo, and cannot express Git-ref or PR-level tenancy. |
+| **Make WorkOS mandatory / use WorkOS as token issuer** | Require WorkOS for all deployments and have downstream services verify WorkOS-issued tokens directly. | Breaks air-gapped, self-hosted, and local Docker Compose parity; couples Core Git and internal service hot paths to a third-party SaaS issuer instead of `stravin-auth` JWKS, `commit_oid`-pinned Git STS tokens, and Valkey `jti` revocation. |
 
 ## Consequences
 
@@ -159,8 +182,8 @@ Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Web
 
 ## Undo / Rollback Path
 
-- **Disable Enterprise SSO Add-On:** Removing or disabling tenant `IdentityProvider` configs reverts a tenant cleanly to standalone local accounts, SSH keys, and PATs with zero schema or downstream wire breakage.
-- **Swap External IdP Protocol:** Because downstream services only verify `stravin-auth` JWTs, migrating a tenant from OIDC to SAML 2.0 (or vice versa) requires updating only the tenant's `IdentityProvider` record while preserving `principal_id` and RBAC bindings.
+- **Disable Enterprise SSO Add-On:** Removing or disabling tenant `IdentityProvider` and `DirectorySyncAdapter` configs reverts a tenant cleanly to standalone local accounts, SSH keys, and PATs with zero schema or downstream wire breakage.
+- **Swap External IdP or Directory Sync Adapter:** Because `stravin-auth` is the sole token issuer and downstream services only verify `stravin-auth` JWTs, migrating a tenant between WorkOS and native OIDC/SAML + SCIM 2.0 requires updating only the tenant's `IdentityProvider` / `DirectorySyncAdapter` records while preserving `principal_id` and RBAC bindings.
 - **Fallback in Core `v1.12.x`:** `stravin-edge` retains `edge.StaticAuthenticator` behind its authenticator interface during the `v1.12.x` -> `vNext` transition.
 
 ## Related Documents
