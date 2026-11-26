@@ -83,7 +83,7 @@ Multi-tenancy degrades performance by 10x–100x only when falling into three av
 ### 2. Noisy-Neighbor Cache & Compaction Starvation (10x Tail-Latency Trap)
 
 - **Trap:** Without cache quotas, one tenant cloning a 50 GB monorepo evicts hot packs belonging to hundreds of smaller tenants—turning sub-10 ms NVMe reads into S3 fetches across the fleet. Likewise, one tenant pushing 3,000 packs/sec can starve `stravin-pack` workers for everyone else.
-- **Fix:** Enforce **per-tenant NVMe byte ceilings** (e.g., no single tenant may occupy more than 20% of a node's cache disk) and use **weighted fair queuing** in `stravin-pack` and `stravin-hook` so heavy tenants trigger autoscaling of their own shard leases rather than delaying quiet tenants.
+- **Fix:** Enforce **per-tenant NVMe byte ceilings** (e.g., no single tenant may occupy more than 20% of a node's cache disk) and use **weighted fair queuing** in `stravin-pack` and `stravin-hook` (`stravin-relay` / `stravin-webhooks` in `vNext`) so heavy tenants trigger autoscaling of their own shard leases rather than delaying quiet tenants.
 
 ### 3. Per-Pack AWS KMS Calls (Latency & Quota Trap)
 
@@ -104,3 +104,4 @@ Stravin Core does not need a Firecracker orchestrator or envelope encryption on 
 - [System Topology & Request Flows](topology.md) — `stravin-edge` routing and `stravin-node` lifecycle.
 - [Storage Layer: S3 & DynamoDB](storage.md) — Tenant-prefixed S3 keys and DynamoDB partition keys.
 - [Server-Side Hooks](hooks.md) — Sidecar boundary and bulkhead isolation for untrusted Wasm hooks.
+- [ADR-0001: Platform Transport, Events & Webhooks](../adr/0001-platform-transport-events-webhooks.md) & [ADR-0003: Platform Auth & SSO Seam](../adr/0003-platform-auth-and-sso-seam.md) — `vNext` **Cilium (eBPF)** workload identity + `CiliumNetworkPolicy` (never replacing mandatory app-level `tenant_id` AuthZ) and **`stravin-auth`** local JWKS + Valkey `jti` isolation.

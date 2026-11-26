@@ -15,7 +15,7 @@ Stravin Core synthesizes patterns from GitHub's **Project Rubicon** and Cursor O
 ## Multi-Region System Topology
 
 !!! note "Local Emulation vs. Production Cloud Primitives"
-    In `stravin-dev/core` (`v1.12.x`), all five Go daemons, Valkey pack caching, and dual-region replication/failover run locally via Docker Compose + Floci. Production cloud ingress (**Route 53 latency routing / AWS Global Accelerator**) and **cloud mTLS service mesh** are **TBD / Planned (Production)**.
+    In `stravin-dev/core` (`v1.12.x`), all five Go daemons, Valkey pack caching, and dual-region replication/failover run locally via Docker Compose + Floci. Production cloud ingress (**Route 53 latency routing / AWS Global Accelerator**) and **Cilium (eBPF)** sidecarless WireGuard/SPIFFE mTLS service mesh ([ADR-0001](../adr/0001-platform-transport-events-webhooks.md)) are **TBD / Planned (Production)**.
 
 ```mermaid
 flowchart TB
@@ -30,7 +30,7 @@ flowchart TB
         S3A[("S3 Bucket (Region A)")]
         DDBA[("DynamoDB (Region A)")]
         PackA["stravin-pack (Go Sharded Compactor)"]
-        HookA["stravin-hook (DDB Streams Async Pool)"]
+        HookA["stravin-hook (v1.12.x)\nstravin-relay -> JetStream (vNext)"]
 
         EdgeA <--> ValkeyA
         EdgeA -->|"Rendezvous Hash (tenant, repo)"| NodeA
@@ -70,10 +70,10 @@ flowchart TB
 Keeping Git operations at the packfile layer—rather than reimplementing Git's entire object graph engine—preserves full compatibility with standard Git internals. The control and data planes split into **five Go daemons** plus the **`stravin-admin` CLI**:
 
 1. **`stravin-edge` (Ingress, Pack Cache & Routing Proxy):**
-    - Terminates SSH (`golang.org/x/crypto/ssh`) and Smart HTTP (`net/http`), enforces authentication, authorization, and per-tenant ingress rate limits (`STRAVIN_RATE_LIMIT_RPS`, `STRAVIN_MAX_CONCURRENT_CLONES`), and resolves each repository's `META` / `home_region` (cached in memory with a short TTL, default `1s`).
+    - Terminates SSH (`golang.org/x/crypto/ssh`) and Smart HTTP (`net/http`), enforces authentication (`edge.StaticAuthenticator` in `v1.12.x`; local JWKS verification + Valkey `jti` deny-list off the synchronous hot path via [`stravin-auth`](../adr/0003-platform-auth-and-sso-seam.md) in `vNext`), authorization, and per-tenant ingress rate limits (`STRAVIN_RATE_LIMIT_RPS`, `STRAVIN_MAX_CONCURRENT_CLONES`), and resolves each repository's `META` / `home_region` (cached in memory with a short TTL, default `1s`).
     - **Tiered Full-Clone Pack Response Cache (`internal/edge/pack_cache.go`):** Serves repeated full-clone Smart HTTP `upload-pack` responses strictly **after** authentication and authorization succeed. Uses **Valkey** (RESP2 hot tier, entries `<= 8 MiB`, `5m` default TTL, `allkeys-lfu` eviction) with **Floci/S3 spillover** (`pack-cache/v1/...`, entries `<= 64 MiB`) and in-process `singleflight` coalescing (`PackCacheCoordinator`) to prevent thundering herds.
     - **Reads:** Routes cache misses locally via **rendezvous hashing** (Highest Random Weight) over healthy `stravin-node` instances in the client's nearest region.
-    - **Writes:** When `local_region == home_region`, routes via rendezvous hashing to the primary `stravin-node` for `(tenant_id, repo_id)` (or `(tenant_id, repo_id, ref_shard)` for hot repositories) to maximize warm cache hits and minimize CAS retries. When `local_region != home_region`, transparently tunnels the Git wire stream over gRPC to `stravin-edge` in `home_region` (production cloud mTLS mesh is **TBD / Planned**).
+    - **Writes:** When `local_region == home_region`, routes via rendezvous hashing to the primary `stravin-node` for `(tenant_id, repo_id)` (or `(tenant_id, repo_id, ref_shard)` for hot repositories) to maximize warm cache hits and minimize CAS retries. When `local_region != home_region`, transparently tunnels the Git wire stream over gRPC to `stravin-edge` in `home_region` (**Cilium eBPF** sidecarless WireGuard/SPIFFE mTLS + Cluster Mesh is **TBD / Planned** per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md)).
 2. **`stravin-node` (Stateless Virtual Replica):**
     - Holds ephemeral NVMe disks storing materialized bare Git repositories strictly as disposable caches.
     - Serves **pure-Go Git Protocol v2 `ls-refs`** (`internal/node/ls_refs.go`) directly from cached DynamoDB ref state without forking `git-upload-pack` (for bounded stateless-RPC requests `<= 1 MiB`), falling back transparently to `git-upload-pack` for other commands.
@@ -128,3 +128,4 @@ Following Project Rubicon's pattern, `stravin-pack` workers claim a manifest sha
 - [Multi-Region HA & Consistency](ha-consistency.md) — Replication asymmetry handling and failover protocol.
 - [Performance & Throughput Scaling](performance.md) — Bottleneck math and LSM compaction tiers.
 - [Sandboxed Execution & Multi-Tenancy](isolation-multitenancy.md) — Execution isolation for `stravin-node` and `stravin-pack`.
+- [ADR-0001: Platform Transport, Events & Webhooks](../adr/0001-platform-transport-events-webhooks.md) & [ADR-0003: Platform Auth & SSO Seam](../adr/0003-platform-auth-and-sso-seam.md) — `vNext` Cilium eBPF mesh, `stravin-relay` -> NATS JetStream, and `stravin-auth` local JWKS + Valkey `jti` verification.

@@ -11,7 +11,7 @@ Hooks are divided strictly by whether they must reject a push before persistence
 | Tier | Git Equivalent | Execution Model | Capabilities Allowed | Latency Impact on `git push` | Use Cases |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier 1: Hermetic Gate** | `pre-receive` / `update` | **Synchronous** Wasm on `stravin-node` (concurrent with S3 `PutObject`) | Pure CPU + read-only Git object host calls; **zero network, zero disk** | **~0 ms net** (overlapped with S3 upload; capped at 50–100 ms) | Secret scanning, commit lint, max file size, path/branch rules, GPG/SSH signature checks |
-| **Tier 2: Reactive Hook** | `post-receive` | **Asynchronous** worker pool (`stravin-hook`) via DynamoDB Streams | Outbound HTTP, external APIs, heavy compute, cross-repo queries | **0 ms** (decoupled via transactional outbox) | Webhooks, CI triggers, issue/chat sync, search indexing, audit pipelines |
+| **Tier 2: Reactive Hook** | `post-receive` | **Asynchronous** worker pool (`stravin-hook` in `v1.12.x`; `stravin-relay` -> NATS JetStream + `stravin-webhooks` in `vNext`) via DynamoDB Streams | Outbound HTTP, external APIs, heavy compute, cross-repo queries | **0 ms** (decoupled via transactional outbox) | Webhooks, CI triggers, issue/chat sync, search indexing, audit pipelines |
 | **Tier 3: Heavy Blocking** | Merge checks | **Async + Gated Merge** in **Stravin Gate** | Arbitrary CI builds, LLM review, external approvals | **0 ms** on feature branch pushes; enforced at merge time | Unit tests, builds, external policy APIs blocking `main` |
 
 ## Concurrent S3 Upload & Wasm Overlap Flow
@@ -93,3 +93,4 @@ To ensure buggy or adversarial hooks cannot degrade `stravin-node`:
 - [System Topology & Request Flows](topology.md) — Full write path and `stravin-node` architecture.
 - [Storage Layer: S3 & DynamoDB](storage.md) — `HOOKS` metadata item and S3 binary layout.
 - [Sandboxed Execution & Multi-Tenancy](isolation-multitenancy.md) — Isolation boundaries for multi-tenant deployments.
+- [ADR-0001: Platform Transport, Events & Webhooks](../adr/0001-platform-transport-events-webhooks.md) — `vNext` `stravin-relay` -> NATS JetStream outbox rename and `stravin-webhooks` extraction.

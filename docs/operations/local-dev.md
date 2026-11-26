@@ -341,9 +341,20 @@ When a developer encounters an unsupported or incompatible AWS behavior in Floci
 3. **Submit Upstream PR to Floci:** Open a pull request against the upstream Floci repository implementing the missing behavior along with the parity tests. Link the upstream PR from the Stravin issue.
 4. **Pin Updated Floci Image:** Once the upstream PR is merged and published in a Floci release, update the pinned Floci image tag/digest in Stravin's Compose and CI manifests and remove any temporary tracking note.
 
+## `vNext` Platform Local Development Parity (Planned)
+
+Per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md) and [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md), daily local development stays 100% in **Docker Compose** as the upper platform layers and foundation services roll out—requiring **no Kubernetes cluster and no Cilium CNI** for day-to-day feature work:
+
+- **Core Outbox & Event Bus (`stravin-relay` + `nats -js`):** Core renames `stravin-hook` (`v1.12.x`) to **`stravin-relay`** (pure DynamoDB Streams -> NATS JetStream relay) paired with a single `nats:2-alpine -js` container backed by a local Docker volume.
+- **Durable Workflows (`Temporal` for Run & Gate only):** A single `temporal server start-dev` container runs **Stravin Run** and **Stravin Gate** workflows locally. **Core**, **Review**, **Index**, **`stravin-webhooks`**, **`stravin-auth`**, and **`stravin-notify`** remain permanently Temporal-free.
+- **Auth & Optional SSO (`stravin-auth` + `--profile sso`):** A single `stravin-auth` container runs in standalone mode out of the box (pre-seeded dev accounts, PATs, SSH keys, `/.well-known/jwks.json`, Valkey `jti` deny-list—zero external IdP or WorkOS dependency). An optional `--profile sso` boots a local mock OIDC/SCIM provider to test enterprise SSO and instant SCIM deprovisioning locally.
+- **External Webhooks & Human Notifications (`stravin-webhooks` & `stravin-notify`):** Both run as lightweight Compose containers consuming the local `nats -js` streams (`STRAVIN_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true` enables local webhook mock receivers; `stravin-notify` fans out In-App WS/SSE over local Valkey pub/sub).
+- **Local Kubernetes & Cilium Testing (OrbStack vs. `kind`):** **OrbStack Kubernetes** works well for validating Helm charts and `StatefulSet` manifests (NATS JetStream, Temporal), but ships a fixed CNI that cannot be swapped. When validating **Cilium eBPF** or `CiliumNetworkPolicy` rules locally, use **`kind` on OrbStack** with `disableDefaultCNI: true` and install Cilium into the `kind` cluster.
+
 ## Related Documents
 
 - [Telemetry & Observability](telemetry.md) — Local OTel Collector and Grafana LGTM stack wiring, trace correlation, and unit-test telemetry muting.
 - [Storage Layer: S3 & DynamoDB](../core/storage.md) — Production S3 key prefix layout, DynamoDB schema, and `TransactWriteItems` semantics.
-- [System Topology & Request Flows](../core/topology.md) — Service roles for `stravin-edge`, `stravin-node`, `stravin-pack`, and `stravin-ctrl`.
-- [Server-Side Hooks](../core/hooks.md) — Tier 1 `wazero` hooks and Tier 2 DynamoDB Streams outbox consumed by `stravin-hook`.
+- [System Topology & Request Flows](../core/topology.md) — Service roles for `stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, and `stravin-hook` (`stravin-relay` in `vNext`).
+- [Server-Side Hooks](../core/hooks.md) — Tier 1 `wazero` hooks and Tier 2 DynamoDB Streams outbox consumed by `stravin-hook` (`v1.12.x`) / `stravin-relay` (`vNext`).
+- [ADR-0001: Platform Transport, Events & Webhooks](../adr/0001-platform-transport-events-webhooks.md) & [ADR-0003: Platform Auth & SSO Seam](../adr/0003-platform-auth-and-sso-seam.md) — `vNext` local Docker Compose parity and `kind` on OrbStack Cilium testing.

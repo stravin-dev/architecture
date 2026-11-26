@@ -160,7 +160,7 @@ The provisioned **Stravin Load Tester** dashboard (`uid: stravin-loadgen`) is or
 `stravin-chaos` (`internal/chaos/nemesis.go`) runs a deterministic, seeded `Nemesis` fault-injection loop against the Toxiproxy admin API (`http://127.0.0.1:8474`):
 
 - **Network Fault Strategies (`FaultAction`):** `latency` (50–400 ms + 10–100 ms jitter), `bandwidth` (64–512 KB/s), `reset_peer` (TCP RST after 50–250 ms), `timeout` (200–1000 ms drop), and `slow_close` (100–500 ms close delay) applied across `edge_http`, `edge_ssh`, `edge_to_node_grpc`, and `node_to_floci`.
-- **Optional Daemon Restarts:** When enabled, `GuardedServiceController` restarts eligible daemons (`stravin-node`, `stravin-edge`, `stravin-pack`, `stravin-hook`) while blocking protected infrastructure services.
+- **Optional Daemon Restarts:** When enabled, `GuardedServiceController` restarts eligible daemons (`stravin-node`, `stravin-edge`, `stravin-pack`, `stravin-hook` [renamed to `stravin-relay` in `vNext` per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md)]) while blocking protected infrastructure services.
 - **Guaranteed Teardown Cleanup:** Every fault removes its toxic after `FaultDuration` (default `3s`), and `Nemesis.Run` always calls `ProxyController.ResetAll` on exit so the cluster returns to a clean state.
 
 ### Local Execution Commands
