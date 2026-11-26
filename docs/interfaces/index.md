@@ -1,8 +1,8 @@
 # Product-Stack Interfaces
 
-This section defines the **meet-in-the-middle interface contracts** across all five Stravin product layers (**Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, and **Stravin Gate**) plus the dedicated outbound **Stravin Webhooks** (`stravin-webhooks`) service. Each direct intersection has one dedicated specification page so teams on both sides can build independently against frozen wire formats, NATS JetStream subjects, Cilium + app-level auth boundaries, and contract-test fixtures.
+This section defines the **meet-in-the-middle interface contracts** across all five Stravin product layers (**Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, and **Stravin Gate**) plus the three dedicated platform foundation services: **Stravin Webhooks** (`stravin-webhooks`), **Stravin Auth** (`stravin-auth`), and **Stravin Notify** (`stravin-notify`). Each direct intersection has one dedicated specification page so teams on both sides can build independently against frozen wire formats, NATS JetStream subjects, Cilium + app-level auth boundaries, and contract-test fixtures.
 
-> **Transport, Event & Auth Architecture:** All interface contracts align with [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](../adr/0001-platform-transport-events-webhooks.md) (**Cilium (eBPF)** sidecarless mTLS, **NATS JetStream** internal async events, **Stravin Webhooks** (`stravin-webhooks`) outbound customer delivery, and **Temporal** durable workflows for **Run** and **Gate**) and [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md) (Phase 1 pull-based Job-Lease runners under Run's Temporal DAG, Phase 2 degraded-tier BYO-CI Checks API, external-only OIDC Apps, and Core/Run/Gate hardening invariants).
+> **Transport, Event & Auth Architecture:** All interface contracts align with [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](../adr/0001-platform-transport-events-webhooks.md) (**Cilium (eBPF)** sidecarless mTLS, **NATS JetStream** internal async events, **Stravin Webhooks** (`stravin-webhooks`) outbound machine-to-machine delivery, and **Temporal** durable workflows for **Run** and **Gate**), [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md) (Phase 1 pull-based Job-Lease runners under Run's Temporal DAG, Phase 2 degraded-tier BYO-CI Checks API, external-only OIDC Apps, and Core/Run/Gate hardening invariants), and [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam](../adr/0003-platform-auth-and-sso-seam.md) (standalone-first `stravin-auth`, pluggable `IdentityProvider` SSO seam, local JWKS + Valkey `jti` hot-path isolation, and instant SCIM revocation).
 
 ## System-Wide Product Topology
 
@@ -14,8 +14,10 @@ flowchart LR
         Run["Stravin Run\n(CI Runners & Pipelines\n[Temporal])"]
         Index["Stravin Index\n(Code Search & Symbols)"]
         Gate["Stravin Gate\n(Merge Queue & Policy\n[Temporal])"]
-        NATS["NATS JetStream\n(Internal Event Backbone\nstravin.<product>.<tenant>.<repo>.<event>)"]
-        Webhooks["Stravin Webhooks\n(stravin-webhooks\nDedicated Egress)"]
+        NATS["NATS JetStream\n(Internal Event Backbone\nstravin.<product>.*)"]
+        Auth["Stravin Auth\n(stravin-auth\nIAM / STS / SSO / RBAC)"]
+        Webhooks["Stravin Webhooks\n(stravin-webhooks\nM2M Egress)"]
+        Notify["Stravin Notify\n(stravin-notify\nHuman Notifications)"]
 
         Core <-->|"1. core-review"| Review
         Core <-->|"2. core-run"| Run
@@ -30,12 +32,19 @@ flowchart LR
         Review <-.->|"stravin.review.>"| NATS
         Run <-.->|"stravin.run.>"| NATS
         Gate <-.->|"stravin.gate.>"| NATS
+        Auth -.->|"10. stravin.auth.>"| NATS
         NATS -.->|"Durable Replay"| Index
         NATS -.->|"9. external-webhooks"| Webhooks
+        NATS -.->|"11. platform-notify"| Notify
+        Notify -->|"RBAC Filter"| Auth
     end
 
     Customer["Customer / 3rd-Party Endpoints\n(Signed HTTPS POST)"]
+    Humans["Human Recipients\n(Inbox WS/SSE, Email, Push, Slack/Teams/Discord)"]
+    ExternalIdP["Optional Enterprise IdP\n(OIDC + SCIM 2.0 / Future SAML 2.0)"]
     Webhooks -->|"X-Stravin-Signature-256"| Customer
+    Notify -->|"ChannelAdapter"| Humans
+    ExternalIdP -.->|"IdentityProvider Seam"| Auth
 ```
 
 ## Intersection Matrix
@@ -52,7 +61,9 @@ Every pair of products either has a direct contract page below or stays intentio
 | 6 | **Review ⟷ Gate** | Approval/policy eligibility snapshot, idempotent enqueue/dequeue API, JetStream queue feedback, Gate Temporal workflows | Proposed Contract (vNext) | [Review ⟷ Gate](review-gate.md) |
 | 7 | **Run ⟷ Gate** | Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version, app_id)`, fast cancel, Run & Gate Temporal workflows | Proposed Contract (vNext) | [Run ⟷ Gate](run-gate.md) |
 | 8 | **Review ⟷ Index** | PR diff code intelligence (go-to-def, find-refs, hover, cross-repo callers) over Cilium mTLS with lag fallback | Proposed Contract (vNext) | [Review ⟷ Index](review-index.md) |
-| 9 | **Platform Events ⟷ External Webhooks** | `stravin-webhooks` subscribing to `stravin.*.>` JetStream streams for outbound customer HTTPS delivery, KMS HMAC-SHA256 signing, SSRF isolation, DLQ/replay | Direct HTTP webhooks in Core v1.12.x; Dedicated `stravin-webhooks` service is vNext | [External Webhooks](external-webhooks.md) |
+| 9 | **Platform Events ⟷ External Webhooks** | `stravin-webhooks` subscribing to `stravin.*.>` JetStream streams for outbound machine-to-machine HTTPS delivery, KMS HMAC-SHA256 signing, SSRF isolation, DLQ/replay | Direct HTTP webhooks in Core v1.12.x; Dedicated `stravin-webhooks` service is vNext | [External Webhooks](external-webhooks.md) |
+| 10 | **Platform Products ⟷ Stravin Auth** | `stravin-auth` standalone IAM/STS/RBAC, pluggable `IdentityProvider` SSO seam (OIDC + SCIM 2.0, future SAML 2.0), local JWKS + Valkey `jti` deny-list, `STRAVIN_AUTH` revocations | Static auth in Core v1.12.x; Dedicated `stravin-auth` service is vNext | [Platform Auth](platform-auth.md) |
+| 11 | **Platform Events ⟷ Stravin Notify** | `stravin-notify` (parallel to `stravin-webhooks`) subscribing to `stravin.*.>` for human notifications: preferences, quiet hours, digests, `stravin-auth` RBAC filtering, `ChannelAdapter` delivery | Proposed Contract (vNext) | [Platform Notify](platform-notify.md) |
 
 ### Intentionally Decoupled Pairs
 
@@ -63,13 +74,13 @@ Two of the ten possible product pairs have **no direct runtime interface**:
 
 ## Shared Platform Contract Conventions
 
-All nine interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal workflow boundaries, and evolution policies below.
+All eleven interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal workflow boundaries, and evolution policies below.
 
 ### Canonical Identifiers
 
 | Identifier | Type / Format | Owner | Notes |
 | :--- | :--- | :--- | :--- |
-| `tenant_id` | String (`[a-z0-9][a-z0-9-_]{1,62}`) | Platform IAM / Core | Mandatory partition prefix on every RPC, HTTP route, NATS subject, cache key, S3 prefix, and DynamoDB key (`T#{tenant_id}`). |
+| `tenant_id` | String (`[a-z0-9][a-z0-9-_]{1,62}`) | Stravin Auth / Core | Mandatory partition prefix on every RPC, HTTP route, NATS subject, cache key, S3 prefix, and DynamoDB key (`T#{tenant_id}`). |
 | `repo_id` | String (`[a-z0-9][a-z0-9._-]{1,126}`) | Core (`META`) | Scoped within `tenant_id`; never globally unique without `tenant_id`. |
 | `object_format` | Enum: `"sha1"` \| `"sha256"` | Core (`META`) | Stored on `META` (`object_format`, default `"sha1"`). Determines OID hex length (40 vs. 64 lowercase hex). |
 | `commit_oid` | 40-char or 64-char lowercase hex | Core | Immutable Git commit hash. Zero OID (`40x0` or `64x0`) denotes ref creation or deletion. |
@@ -80,27 +91,33 @@ All nine interface specifications reuse the vocabulary, Cilium + app-level secur
 | `run_id` | ULID (`run_<ulid>`) | Run | Unique identifier for a CI check run or pipeline execution attempt. |
 | `pr_id` | ULID or monotonic repo-scoped ID (`pr_<ulid>`) | Review | Immutable pull request identifier; survives branch renames and force-pushes. |
 | `queue_entry_id` | ULID (`qe_<ulid>`) | Gate | Unique identifier for a single PR or stacked-diff group entry inside a merge queue. |
-| `app_id` | ULID (`app_<ulid>`) or `"stravin-run"` | Platform IAM / Run | Identifies the first-party Run engine or registered external OIDC App installation attesting a check or Gate verdict ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)). |
+| `app_id` | ULID (`app_<ulid>`) or `"stravin-run"` | Stravin Auth / Run | Identifies the first-party Run engine or registered external OIDC App installation attesting a check or Gate verdict ([ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md), [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md)). |
+| `principal_id` | `usr_<ulid>` \| `svc_<ulid>` \| `app_<ulid>` | Stravin Auth | Canonical JWT subject (`sub`) for human users, internal services, and external OIDC Apps ([Platform Auth](platform-auth.md)). |
+| `idp_id` | ULID (`idp_<ulid>`) | Stravin Auth | Scoped external enterprise IdentityProvider configuration ID (Phase 1 OIDC + SCIM 2.0; future SAML 2.0). |
+| `jti` | ULID (`jti_<ulid>`) | Stravin Auth | Unique JWT identifier checked against the shared Valkey `jti` revocation deny-list. |
+| `notification_id` | ULID (`ntf_<ulid>`) | Stravin Notify | Unique identifier for a persisted human notification item ([Platform Notify](platform-notify.md)). |
 
-### Auth, Tenancy & Transport Boundaries (Cilium eBPF + App-Level AuthZ)
+### Auth, Tenancy & Transport Boundaries (Cilium eBPF + `stravin-auth` + App-Level AuthZ)
 
 1. **Cilium eBPF Sidecarless mTLS & Discovery:** Production Kubernetes transport uses **Cilium (eBPF)** for transparent WireGuard/SPIFFE mTLS at L3/L4, Kubernetes DNS + `EndpointSlice` (+ Cilium Cluster Mesh for multi-region) for discovery, and `CiliumNetworkPolicy` for L3/L4/L7 workload allowlists. This imposes **zero extra proxy hops** on Core's 256 MiB Git streams while `stravin-edge` retains Go HRW `(tenant_id, repo_id)` pinning via a headless Kubernetes Service. (Local Docker Compose retains direct networking and optional app-level TLS 1.3 mTLS matching `internal/rpc/auth.go`'s `RequireAndVerifyClientCert`.)
 2. **Mandatory App-Level Tenancy Invariant (Zero Cross-Tenant Leakage):** Cilium authenticates **workload identity**, NOT `tenant_id`. Every synchronous RPC/HTTP handler and every NATS JetStream consumer MUST still verify that the authenticated credential's or envelope's `tenant_id` matches the target resource `tenant_id` using constant-time comparison (matching `edge.AuthorizeTenant` in Core `v1.12.x`).
-3. **Short-Lived Scoped Service & Git Tokens (Proposed Core Extension vNext — Separate Internal vs. External Trust Roots per [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):**
-    - **Internal First-Party Products (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`):** Stay on Cilium SPIFFE mTLS + signed internal service JWTs (`iss`, `sub`, `aud`, `tenant_id`, `scopes`, `exp <= 5m`) + mandatory constant-time app-level `tenant_id` checks. Internal services are never forced through external OIDC App installation flows.
-    - **External Runners, External CI & Third-Party Integrations (OIDC Apps):** Authenticate via **OIDC Apps** (App Registration + Tenant Installation + OIDC workload identity exchange -> short-lived, single-job/scoped tokens with zero static secrets, strict `aud` pinning, short `exp`, and `jti` replay protection). Run never fetches arbitrary tenant-supplied JWKS URLs directly (use pinned public keys or an SSRF-hardened IAM/STS egress proxy).
+3. **Standalone-First `stravin-auth` & Off-Hot-Path Verification ([ADR-0003](../adr/0003-platform-auth-and-sso-seam.md)):**
+    - **Zero Sync Auth RPCs on Git Hot Path:** `stravin-auth` is never called synchronously on `git push` / `git fetch`. `stravin-edge` and all product services verify `stravin-auth` JWTs locally via cached JWKS (`/.well-known/jwks.json`) + sub-millisecond Valkey `jti` deny-list checks.
+    - **Internal First-Party Products (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`, `Auth`, `Notify`):** Stay on Cilium SPIFFE mTLS + signed internal service JWTs (`iss`, `sub`, `aud`, `tenant_id`, `scopes`, `exp <= 5m`) + mandatory constant-time app-level `tenant_id` checks. Internal services are never forced through external OIDC App installation flows.
+    - **External Runners, External CI & Third-Party Integrations (OIDC Apps — [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)):** Authenticate via **OIDC Apps** managed by `stravin-auth` (App Registration + Tenant Installation + OIDC workload identity exchange -> short-lived, single-job/scoped tokens with zero static secrets, strict `aud` pinning, short `exp`, and `jti` replay protection). Run never fetches arbitrary tenant-supplied JWKS URLs directly (`stravin-auth` enforces pinned public keys or SSRF-hardened safe-dialer egress).
     - **Scoped Git Tokens (`stravin-edge`):** External job-lease and Checks API checkouts use **`commit_oid`-pinned `git:read` tokens (`TTL <= 120s`)** refreshed only via Run while the lease/job is active (never embedded in webhooks). `bundle-uri` presigned S3 URLs require explicit **`git:bundle:read`** scope (auto-granted to Cilium-attested internal pools; opt-in for authorized external pools; presigned URL TTL `<= min(token_remaining_ttl, 120s)`). `git:write` is restricted to explicitly configured protected release/tag pools with narrow `ref_globs` and active server-side `jti` revocation. Core `v1.12.x` currently enforces static `tenant_id:actor_id:token` and SSH `authorized_keys` via `edge.StaticAuthenticator`.
 4. **Trace Context Propagation:** Every HTTP request, gRPC stream, and NATS JetStream message propagates W3C `traceparent` (and optional `tracestate` / `baggage`) per `internal/telemetry/propagation.go`. Async consumers link spans using OTel `SpanLinkFromTraceparent`.
 
 ### Internal Async Event Backbone (NATS JetStream) & Standard Event Envelope
 
 - **Implemented in Core v1.12.x:** `stravin-hook` (`cmd/stravin-hook`, `internal/hooks/async/dispatcher.go`) currently posts a flat push payload (`tenant_id`, `repo_id`, `ref`, `oid`, `pack_id`, `timestamp`) directly over HTTP `POST` with headers `X-Stravin-Event: push`, `X-Stravin-Signature-256: sha256=<hex>`, and `traceparent`.
-- **Proposed Platform Architecture (vNext — NATS JetStream):** All *internal* product-to-product async events publish to **NATS JetStream** (3- or 5-pod Raft-replicated `StatefulSet` + PVCs in Kubernetes; single `nats` container with volume in local Docker Compose). In Core `vNext`, `stravin-hook` is renamed to **`stravin-relay`**—a pure DynamoDB Streams -> NATS JetStream transactional outbox relay with zero Wasm and zero external HTTP delivery. Outbound customer/third-party HTTP delivery and `X-Stravin-Signature-256` signing are handled exclusively by [Stravin Webhooks (`stravin-webhooks`)](external-webhooks.md).
+- **Proposed Platform Architecture (vNext — NATS JetStream):** All *internal* product-to-product async events publish to **NATS JetStream** (3- or 5-pod Raft-replicated `StatefulSet` + PVCs in Kubernetes; single `nats` container with volume in local Docker Compose). In Core `vNext`, `stravin-hook` is renamed to **`stravin-relay`**—a pure DynamoDB Streams -> NATS JetStream transactional outbox relay with zero Wasm and zero external HTTP delivery. Outbound machine-to-machine HTTP delivery and `X-Stravin-Signature-256` signing are handled exclusively by [Stravin Webhooks (`stravin-webhooks`)](external-webhooks.md), while human-facing notifications run in parallel in [Stravin Notify (`stravin-notify`)](platform-notify.md).
 
 **Canonical Subject Hierarchy:**
 
 ```text
-stravin.<product>.<tenant_id>.<repo_id>.<event>
+stravin.<product>.<tenant_id>.<repo_id>.<event>   # repo-scoped events
+stravin.auth.<tenant_id>.<event>                  # tenant-scoped auth/revocation events
 ```
 
 **NATS JetStream Streams & Headers:**
@@ -108,9 +125,10 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
 | Stream | Subject Filter | Purpose |
 | :--- | :--- | :--- |
 | `STRAVIN_CORE` | `stravin.core.>` | Ref updates, repo metadata changes, repo tombstones (retained for Index replay/backfill) |
-| `STRAVIN_REVIEW` | `stravin.review.>` | PR open/update hints, approvals, eligibility invalidations |
+| `STRAVIN_REVIEW` | `stravin.review.>` | PR open/update hints, approvals, mentions, eligibility invalidations |
 | `STRAVIN_RUN` | `stravin.run.>` | Check suite/run transitions, individual gate check completions, batch verdicts |
 | `STRAVIN_GATE` | `stravin.gate.>` | Merge queue position updates, evictions, atomic merges |
+| `STRAVIN_AUTH` | `stravin.auth.>` | Instant `principal.revoked`, `principal.role_changed`, `security.alert`, and `jwks.rotated` events |
 | `STRAVIN_DLQ` | `stravin.dlq.>` | Dead-lettered messages captured from `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>` |
 
 ```text
@@ -141,7 +159,7 @@ Headers:
 ### Durable Workflow Engine (Temporal)
 
 - **Official Scope (Run & Gate):** **Temporal** is the official durable workflow engine for **Stravin Run** (CI pipeline DAG workflows, fan-out/fan-in, heartbeating, retries, cancellations, timeouts) and **Stravin Gate** (speculative merge-queue batch workflows, enqueue/dequeue/verdict signals, atomic Ref-CAS merge activities). Neither service builds throwaway custom state machines. Both still expose **idempotent command/query APIs** (`Idempotency-Key`, explicit cancel and status-read endpoints) and **NATS JetStream** events so sibling products remain decoupled from Temporal internals and never share workflow histories.
-- **Temporal-Free Services:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** (`stravin-webhooks`) remain permanently Temporal-free (synchronous gRPC/HTTP + NATS JetStream events only).
+- **Temporal-Free Services:** **Stravin Core**, **Stravin Review**, **Stravin Index**, **Stravin Webhooks** (`stravin-webhooks`), **Stravin Auth** (`stravin-auth`), and **Stravin Notify** (`stravin-notify`) remain permanently Temporal-free (synchronous gRPC/HTTP + NATS JetStream events only).
 
 ### Compatibility, Versioning & Error Contract
 

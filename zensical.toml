@@ -25,10 +25,13 @@ nav = [
     { "Run ⟷ Gate" = "interfaces/run-gate.md" },
     { "Review ⟷ Index" = "interfaces/review-index.md" },
     { "External Webhooks" = "interfaces/external-webhooks.md" },
+    { "Platform Auth" = "interfaces/platform-auth.md" },
+    { "Platform Notify" = "interfaces/platform-notify.md" },
   ] },
   { "Architecture Decision Records" = [
     { "ADR-0001: Transport, Events & Webhooks" = "adr/0001-platform-transport-events-webhooks.md" },
     { "ADR-0002: External Runner Seam & OIDC Auth" = "adr/0002-external-runner-seam-and-oidc-auth.md" },
+    { "ADR-0003: Platform Auth & SSO Seam" = "adr/0003-platform-auth-and-sso-seam.md" },
   ] },
   { "Operations & Tooling" = [
     { "Local Development" = "operations/local-dev.md" },

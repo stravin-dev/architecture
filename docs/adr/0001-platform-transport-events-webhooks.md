@@ -145,7 +145,7 @@ stravin.<product>.<tenant_id>.<repo_id>.<event>
     - **Local Development (Docker Compose):** Single `temporal` dev container (`temporal server start-dev`) running alongside Core, Floci, Valkey, Grafana LGTM, `nats -js`, and `stravin-webhooks`.
     - **Production Kubernetes (TBD / Planned):** Dedicated Temporal Cluster (Frontend, History, Matching, and Worker services backed by durable persistence) with isolated namespaces for `stravin-run` and `stravin-gate`.
 - **Clean Cross-Product Wire Boundary:** Even with Temporal as an official engine, Run and Gate still expose **idempotent command/query APIs** (`Idempotency-Key` on all mutating endpoints, explicit cancellation and status-reconciliation reads) and consume/emit canonical **NATS JetStream** events. Sibling products never share Temporal workflow histories or call Temporal APIs across product boundaries.
-- **Services Staying Temporal-Free:** **Stravin Core**, **Stravin Review**, **Stravin Index**, and **Stravin Webhooks** (`stravin-webhooks`) remain permanently **Temporal-free**—communicating exclusively via synchronous gRPC/HTTP and **NATS JetStream** events.
+- **Services Staying Temporal-Free:** **Stravin Core**, **Stravin Review**, **Stravin Index**, **Stravin Webhooks** (`stravin-webhooks`), **Stravin Auth** (`stravin-auth`), and **Stravin Notify** (`stravin-notify`) remain permanently **Temporal-free**—communicating exclusively via synchronous gRPC/HTTP and **NATS JetStream** events.
 
 ## Alternatives Considered
 
@@ -200,8 +200,11 @@ Rather than introducing all four pillars in one big-bang cutover—or building t
 ## Related Documents
 
 - [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](0002-external-runner-seam-and-oidc-auth.md) — Phased external runner job-lease vs. Checks API seam, external-only OIDC App auth scope, and Core/Run/Gate security hardening invariants.
+- [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam (`stravin-auth`)](0003-platform-auth-and-sso-seam.md) — Standalone-first IAM/STS/RBAC service, pluggable `IdentityProvider` SSO seam, local JWKS + Valkey `jti` hot-path isolation, and `STRAVIN_AUTH` revocation events.
 - [Product-Stack Interface Overview & Matrix](../interfaces/index.md) — System topology, intersection matrix, and shared contract conventions.
-- [External Webhooks Interface](../interfaces/external-webhooks.md) — Full meet-in-the-middle contract for `stravin-webhooks`.
+- [External Webhooks Interface](../interfaces/external-webhooks.md) — Full meet-in-the-middle contract for `stravin-webhooks` (machine-to-machine outbound webhooks).
+- [Platform Auth Interface](../interfaces/platform-auth.md) — Full meet-in-the-middle contract for `stravin-auth`.
+- [Platform Notify Interface](../interfaces/platform-notify.md) — Full meet-in-the-middle contract for `stravin-notify` (human-facing notifications parallel to `stravin-webhooks`).
 - [Server-Side Hooks](../core/hooks.md) — Core `v1.12.x` three-tier hook architecture and `vNext` JetStream evolution.
 - [Core ⟷ Review](../interfaces/core-review.md), [Core ⟷ Run](../interfaces/core-run.md), [Core ⟷ Index](../interfaces/core-index.md), [Core ⟷ Gate](../interfaces/core-gate.md) — Core product intersections.
 - [Review ⟷ Run](../interfaces/review-run.md), [Review ⟷ Gate](../interfaces/review-gate.md), [Run ⟷ Gate](../interfaces/run-gate.md), [Review ⟷ Index](../interfaces/review-index.md) — Upper-layer product intersections.

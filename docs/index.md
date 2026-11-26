@@ -65,7 +65,7 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 
 ## Product-Stack Interfaces
 
-Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, and **Stravin Webhooks** (`stravin-webhooks`), backed by **Cilium (eBPF)** transport, **NATS JetStream** internal events, and **Temporal** durable workflows for Run and Gate:
+Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, and platform foundation services (**Stravin Webhooks** `stravin-webhooks`, **Stravin Auth** `stravin-auth`, and **Stravin Notify** `stravin-notify`), backed by **Cilium (eBPF)** transport, **NATS JetStream** internal events, and **Temporal** durable workflows for Run and Gate:
 
 - [Product-Stack Interface Overview & Matrix](interfaces/index.md) — System-wide topology, intersection matrix, shared canonical identifiers, Cilium + app-level tenancy rules, NATS JetStream event envelope, Temporal workflow boundaries, and versioning conventions.
 - [Core ⟷ Review](interfaces/core-review.md) — Git Smart HTTP/SSH, proposed read-only Git Data/Diff gRPC API, PR ref namespaces, `stravin.core.*.*.ref.updated` JetStream events, and Tier 1 Wasm hook rejections.
@@ -76,12 +76,15 @@ Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stra
 - [Review ⟷ Gate](interfaces/review-gate.md) — PR approval and policy eligibility snapshots, idempotent enqueue/dequeue/priority API, JetStream queue feedback, atomic stacked-diff merge groups, and Gate's Temporal workflows.
 - [Run ⟷ Gate](interfaces/run-gate.md) — Speculative merge-queue batch builds, JetStream verdicts bound to `(tree_oid, commit_oid, policy_version, app_id)`, fast cancellation on queue eviction/reset, and independent Temporal workflows for Run and Gate.
 - [Review ⟷ Index](interfaces/review-index.md) — PR diff code intelligence (hover, go-to-definition, find-references, cross-repo callers) over Cilium mTLS with RBAC filtering and graceful lag fallback.
-- [External Webhooks](interfaces/external-webhooks.md) — Dedicated `stravin-webhooks` service consuming internal NATS JetStream streams for outbound customer HTTP delivery, KMS HMAC-SHA256 signing, SSRF isolation, and DLQ replay.
+- [External Webhooks](interfaces/external-webhooks.md) — Dedicated `stravin-webhooks` service consuming internal NATS JetStream streams for outbound machine-to-machine HTTP delivery, KMS HMAC-SHA256 signing, SSRF isolation, and DLQ replay.
+- [Platform Auth](interfaces/platform-auth.md) — Dedicated `stravin-auth` IAM/Auth/STS service: standalone-first local auth, pluggable `IdentityProvider` SSO seam (Phase 1 OIDC + SCIM 2.0, future SAML 2.0), local JWKS + Valkey `jti` deny-list off the hot path, and `STRAVIN_AUTH` revocation events.
+- [Platform Notify](interfaces/platform-notify.md) — Dedicated `stravin-notify` human-facing user notification service (parallel to `stravin-webhooks`): preferences, quiet hours, digest batching, `stravin-auth` RBAC leak prevention, and pluggable `ChannelAdapter` delivery (In-App Inbox + WS/SSE, Email, Web Push, Slack/Teams/Discord).
 
 ## Architecture Decision Records
 
 - [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](adr/0001-platform-transport-events-webhooks.md) — Adopts Cilium (eBPF) sidecarless mTLS, NATS JetStream for internal async events, a dedicated `stravin-webhooks` service for outbound customer delivery, and Temporal as the official durable workflow engine for Run and Gate with a four-phase rollout plan.
 - [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](adr/0002-external-runner-seam-and-oidc-auth.md) — Adopts a phased hybrid external runner seam (Phase 1 pull-based Job-Lease under Run's Temporal DAG; Phase 2 degraded-tier BYO-CI via `stravin-webhooks` + `app_id`-bound Checks API), scopes OIDC Apps strictly to external callers, and defines Core/Run/Gate security hardening invariants.
+- [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam (`stravin-auth`)](adr/0003-platform-auth-and-sso-seam.md) — Defines standalone-first `stravin-auth` (passkeys, Argon2id, SSH keys, PATs, OIDC Apps, STS, coarse RBAC), a pluggable `IdentityProvider` SSO seam (Phase 1 OIDC + SCIM 2.0, future SAML 2.0), local JWKS + Valkey `jti` hot-path isolation, and instant SCIM revocation propagation.
 
 ## Operations & Tooling
 
