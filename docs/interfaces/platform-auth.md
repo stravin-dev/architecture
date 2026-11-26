@@ -9,8 +9,8 @@ This specification defines the meet-in-the-middle contract between **Stravin Aut
 | Concern | Source of Truth | Private Implementation Details (Never Crosses Boundary) |
 | :--- | :--- | :--- |
 | **Local accounts (passkeys/WebAuthn, Argon2id), SSH keys, PATs, OIDC Apps & installations** | **Stravin Auth** (`stravin-auth`) | Password hashes, WebAuthn challenges, PAT hash table, KMS signing key custody |
-| **External SSO adapters (Phase 1 OIDC + SCIM 2.0; Future SAML 2.0) & canonical assertion normalization** | **Stravin Auth** (`stravin-auth`) | IdP protocol parsing, PKCE/state stores, SAML XML verification, SSRF-hardened discovery/JWKS client |
-| **STS token minting (service JWTs, user JWTs, `commit_oid`-pinned Git tokens), Valkey `jti` deny-list, coarse org/repo RBAC** | **Stravin Auth** (`stravin-auth`) | Private signing keys, RBAC assignment tables, SCIM group-to-role rules |
+| **External SSO (`IdentityProvider`: Phase 1 OIDC, Optional WorkOS SSO, Future SAML 2.0) & Directory Sync (`DirectorySyncAdapter`: Native SCIM 2.0, Optional WorkOS Directory Sync)** | **Stravin Auth** (`stravin-auth`) | IdP/broker protocol parsing, PKCE/state stores, WorkOS webhook HMAC verification, SAML XML verification, SSRF-hardened discovery/JWKS client |
+| **Sole STS token minting (service JWTs, user JWTs, `commit_oid`-pinned Git tokens), Valkey `jti` deny-list, coarse org/repo RBAC** | **Stravin Auth** (`stravin-auth`) | Private signing keys, RBAC assignment tables, directory group-to-role rules (WorkOS never mints tokens accepted by downstream products) |
 | **Local JWT verification (`/.well-known/jwks.json`) & sub-ms Valkey `jti` checks** | **Consuming Products** (`stravin-edge`, Review, Run, Index, Gate, Webhooks, Notify) | In-process JWKS cache, per-request token parser, constant-time `tenant_id` middleware |
 | **Domain-specific policies (Wasm hooks, branch protection / `CODEOWNERS`, runner pool isolation / leases)** | **Owning Products** (`stravin-node`, Gate, Run) | `HookHostABI` Wasm execution, `policy_version` bundles, Temporal runner leases |
 | **Pod-to-pod workload identity & transport encryption** | **Cilium eBPF Mesh** | WireGuard tunnels, SPIFFE certificates, `CiliumNetworkPolicy` eBPF maps |
@@ -30,11 +30,11 @@ sequenceDiagram
     Edge->>Auth: GET /.well-known/jwks.json (cached locally)
     Products->>Auth: GET /.well-known/jwks.json (cached locally)
 
-    alt Standalone Login or OIDC/SAML SSO
-        User->>Auth: Passkey / Argon2id OR OIDC Auth Code + PKCE (future SAML ACS)
+    alt Standalone Login or OIDC / Optional WorkOS / Future SAML SSO
+        User->>Auth: Passkey / Argon2id OR OIDC / WorkOS / SAML Callback
         Auth->>Auth: Normalize via IdentityProvider seam -> ExternalIdentityAssertion
         Auth->>Auth: Verify external_sub binding (never auto-link unverified email)
-        Auth-->>User: Signed JWT (iss, sub, aud, tenant_id, scopes, jti, exp)
+        Auth-->>User: stravin-auth Signed JWT (iss, sub, aud, tenant_id, scopes, jti, exp)
     else External Runner OIDC App Exchange (ADR-0002)
         User->>Auth: POST /v1/auth/sts/exchange (OIDC assertion + app_id)
         Auth-->>User: Short-lived scoped JWT / commit_oid-pinned git:read (TTL <= 120s)
@@ -46,8 +46,9 @@ sequenceDiagram
     Edge->>Valkey: Sub-ms jti deny-list check (required for git:write / revocable tokens)
     Valkey-->>Edge: Not revoked -> proceed to stravin-node
 
-    Note over User,NATS: Instant SCIM 2.0 Deprovisioning
-    User->>Auth: PATCH /scim/v2/Users/{id} (active: false)
+    Note over User,NATS: Instant Directory Sync Deprovisioning (SCIM 2.0 or WorkOS)
+    User->>Auth: DELETE /scim/v2/Users/{id} OR POST /v1/auth/dsync/workos/webhooks (dsync.user.deleted)
+    Auth->>Auth: Normalize via DirectorySyncAdapter -> DeactivateUser
     Auth->>Auth: Suspend principal, revoke web sessions & PATs
     Auth->>Valkey: Write jti revocations & principal revocation epoch
     Auth->>NATS: Publish stravin.auth.<tenant_id>.principal.revoked
@@ -61,7 +62,8 @@ sequenceDiagram
 - **Strictly Off the Synchronous Hot Path:** `stravin-edge` and all product services MUST NOT make synchronous RPCs to `stravin-auth` on every `git push`, `git fetch`, or hot-path request. Authentication on the hot path uses **in-process JWKS signature verification** plus **Valkey `jti` deny-list lookups** (sub-millisecond).
 - **No Auto-Linking Unverified Emails:** `stravin-auth` rejects any SSO login that attempts to match an existing local account by email when `email_verified` is `false` or without an explicit `(tenant_id, idp_id, external_sub)` link (returning `409 ACCOUNT_LINK_REQUIRED`).
 - **SSRF-Hardened Outbound Egress:** `stravin-auth` is the sole IAM component permitted outbound HTTPS egress to external OIDC IdP discovery/JWKS endpoints (fulfilling [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md)'s IAM/STS egress proxy requirement). Its HTTP dialer resolves DNS immediately prior to dialing and blocks private, loopback, link-local (`169.254.169.254`), carrier-grade NAT, and multicast CIDRs.
-- **SCIM 2.0 Scoping:** Each tenant's SCIM 2.0 bearer token is strictly bound to one `tenant_id`, hashed at rest (Argon2id/SHA-256), supports dual-token rotation, and can never read or modify principals outside its `tenant_id`.
+- **Sole Token Issuer Invariant:** `stravin-auth` is the **only** service that mints JWTs, PATs, and Git STS tokens trusted by Stravin services. External IdPs and optional brokers such as WorkOS (`workos.com`) authenticate or sync users into `stravin-auth` only and NEVER issue tokens accepted by Core, Review, Run, Index, Gate, Webhooks, or Notify.
+- **Directory Sync Scoping & Webhook Verification:** Each tenant's SCIM 2.0 bearer token is strictly bound to one `tenant_id`, hashed at rest (Argon2id/SHA-256), supports dual-token rotation, and can never read or modify principals outside its `tenant_id`. Optional WorkOS Directory Sync webhooks (`POST /v1/auth/dsync/workos/webhooks`) require per-tenant HMAC-SHA256 signature verification (`WorkOS-Signature` header) with timestamp replay-window enforcement (`<= 5m` skew) and constant-time MAC comparison before dispatching into `DirectorySyncAdapter`.
 - **Temporal-Free Service:** `stravin-auth` remains permanently Temporal-free (synchronous HTTP/gRPC + Valkey + NATS JetStream only).
 
 ## 4. Synchronous Interfaces
@@ -153,7 +155,7 @@ Response (`200 OK`):
 
 ### 4.5 Pluggable `IdentityProvider` Seam & Enterprise SSO Endpoints — *Proposed Contract (vNext)*
 
-Internal adapter seam inside `stravin-auth`:
+Internal login adapter seam inside `stravin-auth`:
 
 ```go
 type ExternalIdentityAssertion struct {
@@ -166,15 +168,67 @@ type ExternalIdentityAssertion struct {
 }
 
 type IdentityProvider interface {
-    Protocol() string // "oidc" (Phase 1) | "saml2" (Future)
+    Protocol() string // "oidc" (Phase 1) | "workos" (Optional) | "saml2" (Future)
     BeginAuth(ctx context.Context, req BeginAuthRequest) (RedirectURL string, err error)
     CompleteAuth(ctx context.Context, req CallbackRequest) (ExternalIdentityAssertion, error)
 }
 ```
 
-- **Phase 1 OIDC Endpoints:** `GET /v1/auth/sso/{tenant_id}/oidc/login`, `GET /v1/auth/sso/{tenant_id}/oidc/callback` (Auth Code + PKCE `S256`, pinned issuer, safe-dialer discovery/JWKS).
-- **Phase 1 SCIM 2.0 Endpoints:** `GET/POST /scim/v2/Users`, `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}`, `GET/POST/PUT/PATCH/DELETE /scim/v2/Groups` (RFC 7643/7644, per-tenant bearer token).
-- **Future SAML 2.0 Endpoints:** `GET /v1/auth/sso/{tenant_id}/saml/metadata`, `POST /v1/auth/sso/{tenant_id}/saml/acs` (plugs into `IdentityProvider.CompleteAuth` with zero downstream product changes).
+- **Phase 1 Native OIDC Endpoints:** `GET /v1/auth/sso/{tenant_id}/oidc/login`, `GET /v1/auth/sso/{tenant_id}/oidc/callback` (Auth Code + PKCE `S256`, pinned issuer, safe-dialer discovery/JWKS).
+- **Optional WorkOS SSO Adapter (`workos.com`):** `GET /v1/auth/sso/{tenant_id}/workos/login`, `GET /v1/auth/sso/{tenant_id}/workos/callback` — optional managed-SaaS broker adapter implementing `IdentityProvider`. Exchanges the WorkOS authorization code for the user profile over `stravin-auth`'s SSRF-hardened egress client and emits the identical `ExternalIdentityAssertion`. Self-hosted and local dev deployments require zero WorkOS dependency, and `stravin-auth` remains the sole JWT issuer.
+- **Future Native SAML 2.0 Endpoints:** `GET /v1/auth/sso/{tenant_id}/saml/metadata`, `POST /v1/auth/sso/{tenant_id}/saml/acs` (plugs into `IdentityProvider.CompleteAuth` with zero downstream product changes).
+
+### 4.6 Pluggable `DirectorySyncAdapter` Seam & Provisioning Endpoints — *Proposed Contract (vNext)*
+
+Internal provisioning/deprovisioning adapter seam inside `stravin-auth` normalizing both native SCIM 2.0 and optional WorkOS Directory Sync into one canonical event union:
+
+```go
+type DirectorySyncEventKind string
+
+const (
+    DirSyncUpsertUser        DirectorySyncEventKind = "UpsertUser"
+    DirSyncDeactivateUser    DirectorySyncEventKind = "DeactivateUser"
+    DirSyncSyncGroup         DirectorySyncEventKind = "SyncGroup"
+    DirSyncRemoveGroupMember DirectorySyncEventKind = "RemoveGroupMember"
+)
+
+// DirectorySyncEvent is the normalized union consumed by stravin-auth's
+// internal provisioning and revocation pipeline.
+type DirectorySyncEvent struct {
+    Kind          DirectorySyncEventKind // UpsertUser | DeactivateUser | SyncGroup | RemoveGroupMember
+    TenantID      string
+    IdPID         string
+    EventID       string                 // Adapter-scoped idempotency key
+    ExternalSub   string                 // Immutable external user ID (for user/membership events)
+    Email         string                 // Normalized lowercase email (for UpsertUser)
+    EmailVerified bool                   // Must never auto-link unverified local accounts
+    GroupID       string                 // External group identifier (for SyncGroup / RemoveGroupMember)
+    GroupName     string                 // Human-readable group name for deterministic role mapping
+    MemberSubs    []string               // Full or delta member ExternalSub list (for SyncGroup)
+    Reason        string                 // e.g. "scim_deactivated" | "workos_dsync_deleted"
+}
+
+type DirectorySyncAdapter interface {
+    Source() string // "scim2" (Native) | "workos" (Optional)
+    ParseAndVerify(ctx context.Context, req InboundSyncRequest) ([]DirectorySyncEvent, error)
+}
+```
+
+- **Native SCIM 2.0 Endpoints (Phase 1):** `GET/POST /scim/v2/Users`, `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}`, `GET/POST/PUT/PATCH/DELETE /scim/v2/Groups` (RFC 7643/7644, per-tenant scoped bearer token).
+    - `POST/PUT /scim/v2/Users` -> `UpsertUser`; `PATCH /scim/v2/Users/{id}` (`active: false`) or `DELETE /scim/v2/Users/{id}` -> `DeactivateUser`; `POST/PUT/PATCH /scim/v2/Groups` -> `SyncGroup` / `RemoveGroupMember`.
+- **Optional WorkOS Directory Sync Webhook Endpoint:**
+
+```http
+POST /v1/auth/dsync/workos/webhooks HTTP/1.1
+Host: stravin-auth.internal
+Content-Type: application/json
+WorkOS-Signature: t=1795644311, v1=8f4c2a1b9e...
+```
+
+- **Webhook Verification & Normalization:**
+    - Verifies the `WorkOS-Signature` HMAC-SHA256 digest in constant time against the tenant's configured webhook signing secret and rejects timestamps outside the replay window (`|now - t| > 300s`) with `401 UNAUTHORIZED`.
+    - Normalizes `dsync.user.created` / `dsync.user.updated` -> `UpsertUser`, `dsync.user.deleted` -> `DeactivateUser`, `dsync.group.created` / `dsync.group.updated` / `dsync.group.user_added` -> `SyncGroup`, and `dsync.group.user_removed` -> `RemoveGroupMember`.
+- **Identical Revocation & RBAC Pipeline:** Both native SCIM 2.0 and WorkOS Directory Sync events execute the exact same internal handler: `DeactivateUser` synchronously suspends the principal, revokes web sessions/PATs/SSH keys, writes Valkey `jti` deny-list / `rev_epoch` entries, and publishes `stravin.auth.<tenant_id>.principal.revoked`; `SyncGroup` / `RemoveGroupMember` updates coarse RBAC and publishes `stravin.auth.<tenant_id>.principal.role_changed`.
 
 ## 5. Asynchronous Events & Streams
 
@@ -226,14 +280,16 @@ Example `principal.revoked` envelope:
 | **Valkey `jti` deny-list unreachable** | **Fail closed** (`503 UNAVAILABLE`) for `git:write`, admin mutations, and SCIM-sensitive operations so revoked principals cannot mutate state. Read-only `git:read` with `TTL <= 120s` may optionally log/alert and fall back to strict short-TTL expiry per tenant policy. | Valkey lookup timeout: `50 ms` (no retries on hot path). |
 | **External OIDC IdP discovery/JWKS slow or SSRF target** | Safe dialer blocks private/link-local/loopback IPs immediately (`BLOCKED_SSRF`, non-retryable). If IdP is down, tenant SSO login fails gracefully while standalone break-glass admin accounts remain usable. | Outbound IdP timeout: `5 s`; max 1 retry on transient `5xx`. |
 | **SSO login matches existing local email with `email_verified=false`** | Hard reject with `409 ACCOUNT_LINK_REQUIRED`; audit event logged; local account untouched. | Zero retries; non-retryable security rejection. |
-| **Duplicate SCIM deactivation or role-change webhook** | Idempotent on `(tenant_id, idp_id, external_sub)` and JetStream `Nats-Msg-Id`; `revocation_epoch` increments monotonically only on state change. | At-least-once event propagation; idempotent consumers. |
+| **Duplicate SCIM or WorkOS Directory Sync webhook** | Idempotent on `(tenant_id, idp_id, event_id)` / `(tenant_id, idp_id, external_sub)` and JetStream `Nats-Msg-Id`; `revocation_epoch` increments monotonically only on state change. | At-least-once event propagation; idempotent consumers. |
+| **Invalid WorkOS webhook signature or stale timestamp (`> 5m`)** | Hard reject with `401 UNAUTHORIZED` before parsing payload; audit counter incremented; no directory mutation applied. | Zero retries; non-retryable security rejection. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
 
 ### Side A: Stravin Auth (`stravin-auth`)
 
 - [ ] Implement standalone auth store (passkeys/WebAuthn, Argon2id, SSH keys, PATs, OIDC Apps, coarse org/repo RBAC) with zero external IdP dependency.
-- [ ] Implement `IdentityProvider` seam normalizing external assertions into `(tenant_id, idp_id, external_sub, email, email_verified, groups[])` with Phase 1 OIDC (Auth Code + PKCE, safe-dialer JWKS) + SCIM 2.0 (`/scim/v2/Users`, `/scim/v2/Groups`).
+- [ ] Implement `IdentityProvider` seam normalizing external assertions into `(tenant_id, idp_id, external_sub, email, email_verified, groups[])` with Phase 1 Native OIDC (Auth Code + PKCE, safe-dialer JWKS) and optional WorkOS SSO adapter (`workos.com`), keeping `stravin-auth` as sole token issuer.
+- [ ] Implement `DirectorySyncAdapter` seam normalizing native SCIM 2.0 (`/scim/v2/Users`, `/scim/v2/Groups`) and optional WorkOS Directory Sync webhooks (`POST /v1/auth/dsync/workos/webhooks`, HMAC-SHA256 + timestamp replay verification) into `DirectorySyncEvent` (`UpsertUser`, `DeactivateUser`, `SyncGroup`, `RemoveGroupMember`).
 - [ ] Enforce no auto-linking to unverified local emails and constant-time `tenant_id` checks on every route.
 - [ ] Write `jti` revocations and `rev_epoch` to Valkey and publish `stravin.auth.<tenant_id>.principal.revoked` on SCIM deactivation, suspension, or role downgrade.
 - [ ] Serve `/.well-known/jwks.json`, `/v1/auth/sts/exchange`, `/v1/auth/ssh/resolve`, and `/v1/auth/rbac/filter`.
@@ -249,5 +305,6 @@ Example `principal.revoked` envelope:
 
 - `fixtures/platform-auth/jwt-claims-vectors.json` — Valid, expired, wrong-audience, cross-tenant, and `commit_oid`-pinned JWT verification vectors against a test JWKS.
 - `fixtures/platform-auth/scim-revocation-flow.json` — SCIM `active: false` patch -> expected Valkey `jti`/`rev_epoch` mutations and `stravin.auth.<tenant_id>.principal.revoked` JetStream envelope.
+- `fixtures/platform-auth/dirsync-workos-scim-equivalence.json` — Verifies that an HMAC-signed WorkOS `dsync.user.deleted` webhook (`POST /v1/auth/dsync/workos/webhooks`) produces the exact same Valkey `jti` / `rev_epoch` revocation mutations and `stravin.auth.<tenant_id>.principal.revoked` JetStream event as a native SCIM `DELETE /scim/v2/Users/{id}` request (plus invalid-signature and stale-timestamp `401` rejection cases).
 - `fixtures/platform-auth/sso-unverified-email-reject.json` — `ExternalIdentityAssertion` vectors verifying `409 ACCOUNT_LINK_REQUIRED` when `email_verified=false` or unlinked local account exists.
 - `fixtures/platform-auth/ssrf-blocked-oidc-issuers.json` — Private IPv4/IPv6, loopback, `169.254.169.254`, and DNS-rebinding IdP discovery/JWKS URLs verifying fail-closed rejection.
