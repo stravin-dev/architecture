@@ -105,7 +105,7 @@ Authorization: Bearer <service-jwt>
 
 ### 4.3 Gate -> Run: Verdict Reconciliation Pull — *Proposed Contract (vNext)*
 
-- `GET /v1/gate-builds/{batch_run_id}` — Returns current status and per-check verdicts so Gate can recover after missed webhooks or restarts.
+- `GET /v1/gate-builds/{batch_run_id}` — Returns current status and per-check verdicts so Gate can recover after missed JetStream events or restarts.
 
 ## 5. Asynchronous Events & Streams
 

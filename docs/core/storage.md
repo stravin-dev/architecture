@@ -71,8 +71,8 @@ Each physical DynamoDB partition enforces a hard limit of **1,000 WCU/sec**. Pla
 | **Compaction Leases** | `T#{tenant_id}#REPO#{repo_id}#LEASE` | `SHARD#{m}` | `owner_id`, `lease_expires_at` |
 | **Regional Write Lease** | `REGION#{region}#LEASE` | `WRITE` | `owner_id`, `mode` (`ACTIVE` / `DRAINING` / `READ_ONLY`), `lease_expires_at`, `updated_at` |
 | **Hook Configuration (Tier 1)** | `T#{tenant_id}#REPO#{repo_id}` | `HOOKS` | Ordered list of `{hook_id, wasm_sha256, ref_glob, timeout_ms, memory_limit_mb, fail_mode}` (optional org inheritance at `T#{tenant_id}#ORG#{org_id}`) |
-| **Webhook Configuration (Tier 2)** | `T#{tenant_id}#REPO#{repo_id}` | `WEBHOOKS` | List of outbound webhook endpoints, KMS-encrypted signing secrets, ref globs, and retry policies |
-| **Streams Checkpoint** | `STREAMS#CHECKPOINT` | `SHARD#{shard_id}` | `sequence_number`, `updated_at` — durable `stravin-hook` DynamoDB Streams cursor |
+| **Webhook Configuration (Tier 2)** | `T#{tenant_id}#REPO#{repo_id}` | `WEBHOOKS` | List of outbound webhook endpoints, KMS-encrypted signing secrets, ref globs, and retry policies (`v1.12.x`; moves to `stravin-webhooks` in `vNext` per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md)) |
+| **Streams Checkpoint** | `STREAMS#CHECKPOINT` | `SHARD#{shard_id}` | `sequence_number`, `updated_at` — durable `stravin-hook` (`v1.12.x`) / `stravin-relay` (`vNext`) DynamoDB Streams cursor |
 
 ### `META` Version Counters & Hot-Key Trade-Off
 

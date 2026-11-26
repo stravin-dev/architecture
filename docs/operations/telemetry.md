@@ -94,7 +94,8 @@ sequenceDiagram
 ### Fetch (`git fetch` / `git clone`) & Background Worker Traces
 
 - **Read Path (`git fetch` / `git clone`):** `stravin-edge` starts the root `edge.ingress` span (`git.operation=fetch`), propagates `traceparent` to local `stravin-node`, which records child spans for incremental DynamoDB manifest/ref queries (`ddb.query_refs`, `ddb.query_manifest`), local NVMe cache lookup (`node.cache.lookup`), concurrent local S3 pack fetches (`s3.get_pack`), optional cross-region `404 NoSuchKey` origin fallback (`s3.origin_fallback`), and sandboxed `git-upload-pack` execution (`node.git.upload_pack`).
-- **Async Outbox Continuation:** Because `stravin-node` persists the W3C `traceparent` string as a lightweight attribute on the `Ref History` item inside `TransactWriteItems`, `stravin-hook` links its asynchronous `hook.async.dispatch` and outbound webhook HTTP spans directly back to the originating `git push` trace without adding any write-path latency.
+- **Async Outbox Continuation:** Because `stravin-node` persists the W3C `traceparent` string as a lightweight attribute on the `Ref History` item inside `TransactWriteItems`, `stravin-hook` (`v1.12.x`) links its asynchronous `hook.async.dispatch` and outbound webhook HTTP spans directly back to the originating `git push` trace without adding any write-path latency.
+    - **`vNext` Platform Trace Propagation ([ADR-0001](../adr/0001-platform-transport-events-webhooks.md), [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md)):** In `vNext`, `stravin-relay` (renamed from `stravin-hook`) injects the persisted W3C `traceparent` into **NATS JetStream** message headers (`STRAVIN_CORE`). Downstream services (`Review`, `Run`, `Index`, `Gate`, `stravin-webhooks`, `stravin-auth`, `stravin-notify`) link spans via `SpanLinkFromTraceparent`, and **Run** / **Gate** propagate `traceparent` across **Temporal** workflow and activity headers so a single Tempo trace links `git push` → `stravin-relay` → JetStream → Temporal / `stravin-webhooks` / `stravin-notify`.
 - **Background Daemons (`stravin-pack` & `stravin-ctrl`):**
     - `stravin-pack` opens a root trace per compaction job (`pack.compact.shard`) with child spans for lease acquisition (`ddb.lease_acquire`), S3 pack download, merge/indexing, two-phase manifest publish/supersede (`ddb.manifest_publish`, `ddb.manifest_supersede`), and delayed GC sweeps (`pack.gc.sweep`).
     - `stravin-ctrl` opens a root trace per failover or integrity scrub cycle (`ctrl.failover.transition`, `ctrl.scrub.region`) tagged with `failover_epoch`, recording `HeadObject` verification counts and any ref rewind transactions.
@@ -107,7 +108,7 @@ Consistent naming across traces, logs, and metrics lets dashboards and ad-hoc Te
 
 | Attribute | Scope | Description |
 | :--- | :--- | :--- |
-| `service.name` | Resource (all signals) | Daemon binary name: `stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, `stravin-hook` |
+| `service.name` | Resource (all signals) | Daemon binary name: `stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, `stravin-hook` (`stravin-relay` in `vNext`; plus `stravin-webhooks`, `stravin-auth`, `stravin-notify`, and upper products in `vNext`) |
 | `region` | Resource (all signals) | Local AWS region executing the span (e.g., `us-east-1`) |
 | `home_region` | Span / Log | Authoritative write region for the target repository |
 | `tenant_id` | Span / Log (bounded metric only for tier/pool) | Owning tenant identifier |
@@ -165,5 +166,6 @@ In `stravin-dev/core` (`internal/telemetry/cardinality.go`), `Provider.Meter(...
 - [Local Development with Docker Compose & Floci](local-dev.md) — Running the optional `--profile telemetry` LGTM stack alongside Floci.
 - [Service Scaling](scaling.md) — Using these OpenTelemetry and Prometheus signals to scale each Stravin Go daemon up/out and down/in.
 - [System Topology & Request Flows](../core/topology.md) — Multi-region request paths traced by `stravin-edge`, `stravin-node`, `stravin-pack`, and `stravin-ctrl`.
-- [Server-Side Hooks](../core/hooks.md) — Concurrent S3 + `wazero` execution model and DynamoDB Streams outbox traced into `stravin-hook`.
+- [Server-Side Hooks](../core/hooks.md) — Concurrent S3 + `wazero` execution model and DynamoDB Streams outbox traced into `stravin-hook` (`v1.12.x`) / `stravin-relay` (`vNext`).
 - [Storage Layer: S3 & DynamoDB](../core/storage.md) — Shard keys (`ref_shard`, `manifest_shard`) and `Ref History` schema carrying trace context.
+- [ADR-0001: Platform Transport, Events & Webhooks](../adr/0001-platform-transport-events-webhooks.md) & [ADR-0003: Platform Auth & SSO Seam](../adr/0003-platform-auth-and-sso-seam.md) — `vNext` W3C `traceparent` propagation across NATS JetStream, Temporal, `stravin-webhooks`, `stravin-auth`, and `stravin-notify`.
