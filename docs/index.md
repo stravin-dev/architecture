@@ -80,6 +80,15 @@ Dedicated meet-in-the-middle interface contracts across **Stravin Core**, **Stra
 - [Platform Auth](interfaces/platform-auth.md) — Dedicated `stravin-auth` IAM/Auth/STS service: standalone-first local auth, pluggable `IdentityProvider` SSO seam (Phase 1 OIDC, optional WorkOS SSO, future SAML 2.0) and `DirectorySyncAdapter` seam (native SCIM 2.0, optional WorkOS Directory Sync), local JWKS + Valkey `jti` deny-list off the hot path, and `STRAVIN_AUTH` revocation events.
 - [Platform Notify](interfaces/platform-notify.md) — Dedicated `stravin-notify` human-facing user notification service (parallel to `stravin-webhooks`): preferences, quiet hours, digest batching, `stravin-auth` RBAC leak prevention, and pluggable `ChannelAdapter` delivery (In-App Inbox + WS/SSE, Email, Web Push, Slack/Teams/Discord).
 
+## UI Design
+
+GitHub-familiar developer ergonomics styled with Stravin's architectural branding and optimized for clarity and progressive disclosure:
+
+- [UI Design Overview & Shell](ui/index.md) — Design principles, canonical Stravin brand tokens, GitHub ⟷ Stravin UX mapping, and global navigation architecture.
+- [Pull Requests (`Stravin Review`)](ui/pull-requests.md) — Pull Requests list, stacked diff strip, inline `Stravin Index` symbol hover, and unified Checks & Gate merge box.
+- [Actions & Workflows (`Stravin Run`)](ui/actions-runs.md) — Workflow run list, `Hosted` vs `External OIDC` runner pools, visual Temporal Job DAG with `tree_oid` verdict reuse, and live streaming step logs.
+- [Settings (`Auth`, `Gate`, `Webhooks`, `Notify`, `Runners`)](ui/settings.md) — Protected branches and Merge Queue toggles, standalone vs SSO add-on (`stravin-auth`), external webhook redelivery (`stravin-webhooks`), and user notification channels (`stravin-notify`).
+
 ## Architecture Decision Records
 
 - [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](adr/0001-platform-transport-events-webhooks.md) — Adopts Cilium (eBPF) sidecarless mTLS, NATS JetStream for internal async events, a dedicated `stravin-webhooks` service for outbound customer delivery, and Temporal as the official durable workflow engine for Run and Gate with a four-phase rollout plan.
