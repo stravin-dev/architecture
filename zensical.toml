@@ -28,6 +28,12 @@ nav = [
     { "Platform Auth" = "interfaces/platform-auth.md" },
     { "Platform Notify" = "interfaces/platform-notify.md" },
   ] },
+  { "UI Design" = [
+    { "Overview & Shell" = "ui/index.md" },
+    { "Pull Requests" = "ui/pull-requests.md" },
+    { "Actions & Workflows" = "ui/actions-runs.md" },
+    { "Settings" = "ui/settings.md" },
+  ] },
   { "Architecture Decision Records" = [
     { "ADR-0001: Transport, Events & Webhooks" = "adr/0001-platform-transport-events-webhooks.md" },
     { "ADR-0002: External Runner Seam & OIDC Auth" = "adr/0002-external-runner-seam-and-oidc-auth.md" },
