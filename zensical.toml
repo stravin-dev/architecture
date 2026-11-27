@@ -27,6 +27,7 @@ nav = [
     { "External Webhooks" = "interfaces/external-webhooks.md" },
     { "Platform Auth" = "interfaces/platform-auth.md" },
     { "Platform Notify" = "interfaces/platform-notify.md" },
+    { "Run Artifacts & Cache" = "interfaces/run-artifacts-cache.md" },
   ] },
   { "UI Design" = [
     { "Overview & Shell" = "ui/index.md" },
