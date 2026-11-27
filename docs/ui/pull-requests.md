@@ -38,6 +38,21 @@ Stravin supports native branch-on-branch stacking without custom CLI wrappers or
 | **Mode A — Merge Full Stack (Top-Down Atomic Group)** | `FULL_STACK_ATOMIC` | Any upper/tip PR (`Queue Full Stack (3 PRs)`) | Enqueues the entire unmerged chain (`[#101, #102, #103]`) into Gate under one `stack_group_id`. Gate validates the combined tip once (reusing `tree_oid` verdicts where applicable), merges the full stack atomically into `main`, marks all PRs Merged, and cleans up intermediate branches. |
 | **Mode B — Incremental Bottom-Up Merge (Fast-Forward Cascade)** | `BOTTOM_UP_CASCADE` | Bottom PR (`Queue #101 (Fast-Forward)`) or secondary CTA on upper PR (`Merge Bottom-Up (#101 first)`) | Lands the bottom PR (`#101 -> main`) via fast-forward when linear, then automatically retargets `#102`'s base branch from `feat/auth` to `main` (`review.pr.base_retargeted`) and fast-forwards/restacks cleanly down the chain while upper PRs stay open in review. |
 
+## Extensible File-Type Diff Renderers
+
+The `Files Changed` workspace delegates file body rendering to a pluggable **`DiffRenderer` registry** ([ADR-0004](../adr/0004-frontend-stack-spa-go-bff.md)) so Stravin ships fast with rock-solid code diffs today and adds rich visual or structured diffs later without changing the PR Review shell or Core Git API:
+
+- **Priority-Ordered Registry & Lazy Loading:** Renderers register in `packages/review/src/diff/` with a numeric `priority` and a matcher over `(mime_type, extension, is_binary)`. The highest-priority match wins, and each renderer loads on demand via Vite code-splitting (**0 KB bundle cost** on pure code PRs).
+- **Uniform File-Card Chrome:** Every file card keeps the **exact same header chrome**—file path, `+N / -M` or byte size delta, view-mode pill, `Viewed` checkbox, and `Raw` link—regardless of which renderer owns the body.
+- **On-Demand Blob Streaming:** Diff responses carry file metadata (`mime_type`, `is_binary`, `old_blob_oid`, `new_blob_oid`, `old_size_bytes`, `new_size_bytes`) with `hunks: []` for non-text files; visual renderers stream raw bytes on demand through `stravin-web` and `GitData.GetBlob` ([Core ⟷ Review](../interfaces/core-review.md)).
+
+| Phase | Renderer | File Types & View Modes | Comments & Intelligence |
+| :--- | :--- | :--- | :--- |
+| **Phase 1 (Launch)** | `CodeDiffRenderer` | Source & text files; virtualized `Split` / `Unified` diff with syntax highlighting | Inline line comments + `Stravin Index` symbol hover |
+| **Phase 1 (Launch)** | `BinaryMetadataRenderer` | Safe fallback for any unmatched binary (`is_binary: true`); shows byte size delta, blob OIDs, and `Raw` download | File-level comments |
+| **Phase 2 (Follow-on)** | `ImageDiffRenderer` | `PNG`, `JPEG`, `WebP`, `GIF`, `AVIF`; `2-up`, `Swipe`, `Onion-Skin`, and `Pixel Diff` modes | File-level comments + optional `(x, y)` region comments |
+| **Future Extensions** | Pluggable `DiffRenderer` modules | Rich Markdown, CSV/tabular, structural JSON/YAML, sandboxed SVG, notebooks, PDF | Drop in by registering a new lazy-loaded `DiffRenderer` module |
+
 ## End-to-End Developer Flow
 
 ```mermaid

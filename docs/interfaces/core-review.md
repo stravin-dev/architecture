@@ -75,10 +75,17 @@ service GitData {
   rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
   rpc GetCommit(GetCommitRequest) returns (CommitResponse);
   rpc ListTree(ListTreeRequest) returns (ListTreeResponse);
-  rpc StreamBlob(StreamBlobRequest) returns (stream BlobChunk);
+  rpc GetBlob(GetBlobRequest) returns (stream BlobChunk);
   rpc MergeBase(MergeBaseRequest) returns (MergeBaseResponse);
-  rpc CompareDiff(CompareDiffRequest) returns (stream DiffEntry);
+  rpc CompareDiff(CompareDiffRequest) returns (stream DiffFileEntry);
   rpc CreateCommitAndUpdateRef(CreateCommitRequest) returns (UpdateRefResponse);
+}
+
+message GetBlobRequest {
+  string tenant_id = 1;
+  string repo_id = 2;
+  string blob_oid = 3;         // 40-hex (sha1) or 64-hex (sha256)
+  uint64 max_bytes = 4;        // bounded streaming cap enforced by Core
 }
 
 message CompareDiffRequest {
@@ -92,19 +99,26 @@ message CompareDiffRequest {
   string page_token = 8;
 }
 
-message DiffEntry {
+message DiffFileEntry {
   string path = 1;
   string old_path = 2;         // populated on rename
   string change_kind = 3;      // "add" | "modify" | "delete" | "rename"
-  string old_blob_oid = 4;
-  string new_blob_oid = 5;
-  bool binary = 6;
-  uint32 additions = 7;
-  uint32 deletions = 8;
-  bytes unified_patch = 9;     // truncated if > max_patch_bytes
-  bool patch_truncated = 10;
+  string mime_type = 4;        // detected MIME type (e.g. "text/x-go", "image/png")
+  bool is_binary = 5;
+  string old_blob_oid = 6;
+  string new_blob_oid = 7;
+  uint64 old_size_bytes = 8;
+  uint64 new_size_bytes = 9;
+  uint32 additions = 10;
+  uint32 deletions = 11;
+  repeated DiffHunk hunks = 12; // empty ([]) for binary / non-text files
+  bytes unified_patch = 13;     // empty for binary files; truncated if > max_patch_bytes
+  bool patch_truncated = 14;
 }
 ```
+
+- **Pluggable Diff Renderer Metadata:** Every `DiffFileEntry` carries `mime_type`, `is_binary`, `old_blob_oid`, `new_blob_oid`, `old_size_bytes`, and `new_size_bytes` so Review's `DiffRenderer` registry ([Pull Requests UI](../ui/pull-requests.md), [ADR-0004](../adr/0004-frontend-stack-spa-go-bff.md)) can select code, image, binary fallback, or future renderers without extra metadata round-trips.
+- **Bounded On-Demand Blob Streaming (`hunks: []` + `GetBlob`):** Binary and non-text files always return `hunks: []` (and empty `unified_patch`) in the diff JSON/gRPC response—diff responses never base64-inflate binary payloads. When a lazy-loaded renderer (for example `ImageDiffRenderer`) needs file contents, `stravin-web` streams raw `old_blob_oid` / `new_blob_oid` bytes on demand via `GitData.GetBlob` with a bounded `max_bytes` limit and serves them with `X-Content-Type-Options: nosniff` and strict CSP.
 
 ### 4.3 Tier 1 Wasm Hook Rejection Surface — *Implemented in Core v1.12.x*
 
