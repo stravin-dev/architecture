@@ -1,6 +1,6 @@
 # ADR-0004: Web Frontend Stack — Static TypeScript SPA + Go BFF (`stravin-web`)
 
-- **Status:** Proposed
+- **Status:** Accepted (Stack Defaults Locked)
 - **Date:** 2026-11-26
 - **Scope:** Web application runtime architecture, browser authentication boundary, real-time streaming proxy, modular frontend workspace structure, security headers, public SEO/OpenGraph unfurling, and local development parity across **Stravin Core**, **Stravin Review**, **Stravin Run**, **Stravin Index**, **Stravin Gate**, **Stravin Auth**, **Stravin Notify**, and **Stravin Webhooks**.
 
@@ -23,14 +23,14 @@ Building the Stravin web application introduces five competing architectural req
 
 ## Decision
 
-We adopt a **Static TypeScript SPA (Vite + React or Svelte, with lazy-loaded route modules)** paired with a **Thin Go Backend-for-Frontend (`stravin-web`)**, running **zero Node.js or Bun processes in production**.
+We adopt a **Static TypeScript SPA (React 19 + TypeScript + Vite + Tailwind CSS + `@pierre/diffs`, with lazy-loaded route modules)** inside the **`stravin-dev/platform`** monorepo, paired with a **Thin Go Backend-for-Frontend (`stravin-web`)** using **Protobuf + ConnectRPC (`buf`)** contracts and running **zero Node.js or Bun processes in production**.
 
 ```mermaid
 flowchart TB
-    subgraph Browser["Browser — Static TypeScript SPA (Vite Build, Zero Prod Node.js)"]
+    subgraph Browser["Browser — Static React 19 SPA (Vite + Tailwind CSS, Zero Prod Node.js)"]
         Shell["Unified Stravin Shell\n(Top Nav, Repo Header, Shortcuts,\nTheme Tokens, Live Toast/Inbox WS)"]
-        subgraph LazyModules["Lazy-Loaded Feature Packages (Modular Monorepo)"]
-            PkgReview["packages/review/\n(Virtualized Diffs, Inline Comments,\nStacked PR Strip)"]
+        subgraph LazyModules["Lazy-Loaded Feature Packages (stravin-dev/platform Monorepo)"]
+            PkgReview["packages/review/\n(@pierre/diffs Virtualized Diffs,\nInline Comments, Stacked PR Strip)"]
             PkgRun["packages/run/\n(Temporal DAG Canvas,\nLive Step Logs)"]
             PkgGate["packages/gate/\n(Merge Queue, Policy Checks)"]
             PkgIndex["packages/index-client/\n(Hover & Go-to-Def Popovers)"]
@@ -45,9 +45,9 @@ flowchart TB
 
     CDN["CDN or Go embed.FS\n(Immutable Hashed JS/CSS Assets)"]
 
-    subgraph WebBFF["stravin-web (Thin Go BFF)"]
+    subgraph WebBFF["stravin-web (Thin Go BFF — Protobuf + ConnectRPC)"]
         AuthTerm["Cookie Session Termination\n(HttpOnly, Secure, SameSite=Lax + CSRF)"]
-        Aggregator["Read Aggregator & API Proxy\n(Mandatory App-Level tenant_id)"]
+        Aggregator["ConnectRPC Proxy & Read Aggregator\n(Mandatory App-Level tenant_id)"]
         StreamProxy["WebSocket / SSE Stream Proxy\n(Logs, DAG, Queue, In-App Notify)"]
         MetaInject["Thin Go HTML Meta / OpenGraph Injector\n(Public Repo & PR URLs)"]
         SecHeaders["Strict CSP (Nonce/Hash), nosniff,\nReferrer-Policy, Markdown Sanitization"]
@@ -65,42 +65,44 @@ flowchart TB
     end
 
     Browser -->|"Static Assets (HTTPS)"| CDN
-    Browser <-->|"HTTPS /api/* (Session Cookie + CSRF)"| AuthTerm
+    Browser <-->|"HTTPS ConnectRPC /api/* (Cookie + CSRF)"| AuthTerm
     Browser <-->|"WSS / SSE /ws/*"| StreamProxy
     Browser -->|"GET Public Repo/PR HTML"| MetaInject
 
     AuthTerm --> SecHeaders
     AuthTerm --> Aggregator
     AuthTerm <-->|"Session & Token Exchange"| Auth
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Core
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Review
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Run
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Index
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Gate
-    Aggregator <-->|"Cilium mTLS gRPC/HTTP + tenant_id"| Webhooks
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Core
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Review
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Run
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Index
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Gate
+    Aggregator <-->|"Cilium mTLS gRPC + tenant_id"| Webhooks
     StreamProxy <-->|"Live CI Logs & DAG Events"| Run
     StreamProxy <-->|"Merge Queue Updates"| Gate
     StreamProxy <-->|"Live Inbox & Toast Stream"| Notify
 ```
 
-### 1. Static TypeScript SPA & Zero Node.js Runtime in Production
+### 1. Locked Frontend Stack & Zero Node.js Runtime in Production
 
-- **Build-Time Bundling Only:** All TypeScript, CSS, and static assets are compiled once at CI time with **Vite** (targeting React or Svelte with strict TypeScript and code-split lazy route modules).
+- **Build-Time Bundling Only:** All TypeScript, CSS, and static assets are compiled once at CI time with **Vite** targeting **React 19**, **strict TypeScript**, and **Tailwind CSS**, with code-split lazy route modules.
+- **Code Diff Engine (`@pierre/diffs`):** The default `CodeDiffRenderer` is powered by **`@pierre/diffs`** ([diffs.com](https://diffs.com/), Apache-2.0) providing Shiki syntax highlighting and virtualized split/unified diffs inside the lazy-loaded `DiffRenderer` registry.
 - **Static Asset Delivery:** Compiled assets are content-hashed and served either from a CDN edge (SaaS) or directly from Go's `embed.FS` compiled into the `stravin-web` binary (self-hosted and local Docker Compose).
 - **Zero Production JS Server:** No Node.js, Deno, or Bun runtime is deployed, patched, or scaled in production clusters. Every production web tier pod is a single static Go binary (`stravin-web`).
 
-### 2. Modular Monorepo Without Micro Frontends (MFE)
+### 2. Modular Monorepo (`stravin-dev/platform`) & Protobuf + ConnectRPC (`buf`)
 
-Rather than splitting the UI into independently deployed Micro Frontends, Stravin uses a single modular TypeScript monorepo built into one cohesive application:
+Rather than splitting the UI into independently deployed Micro Frontends or maintaining hand-written OpenAPI specs across repositories, all upper platform services and the web workspace live in one **`stravin-dev/platform`** monorepo alongside standalone `stravin-dev/core`:
 
-- **Unified Stravin Shell:** Owns the global top navigation bar, repository header, command palette and keyboard shortcuts, canonical Stravin theme/brand tokens, and a single shared `stravin-notify` WebSocket/SSE connection for live in-app toasts and inbox counts.
+- **Single API / BFF Contract (`buf` Protobuf + ConnectRPC):** One canonical `proto/` schema generates both Go gRPC servers/clients (internal Cilium mTLS) and typed TypeScript ConnectRPC clients for React 19—eliminating hand-written OpenAPI drift between `stravin-web` and the browser.
+- **Unified Stravin Shell:** Owns the global top navigation bar, repository header, command palette and keyboard shortcuts, canonical Stravin theme/brand tokens (Tailwind CSS), and a single shared `stravin-notify` WebSocket/SSE connection for live in-app toasts and inbox counts.
 - **Lazy-Loaded Product Feature Packages:** Product domains live in isolated workspace packages loaded on demand per route:
-    - `packages/review/` — Pull request list, virtualized diffs, inline comment threads, and Stacked PR navigation strip.
+    - `packages/review/` — Pull request list, virtualized `@pierre/diffs` code diffs, pluggable `DiffRenderer` registry, inline comment threads, and Stacked PR navigation strip.
     - `packages/run/` — Workflow runs, runner pool badges, interactive Temporal DAG canvas, and streaming step log viewer.
     - `packages/gate/` — Merge queue status, speculative batch views, and branch protection summaries.
     - `packages/settings/` — Repository and organization settings for `Auth`, `Gate`, `Webhooks`, `Notify`, and `Runners`.
     - `packages/index-client/` — Lightweight code intelligence client for symbol hover, go-to-definition popovers, and code search queries.
-- **Ownership Without Runtime Tax:** Each package has explicit `CODEOWNERS`, independent unit tests, and typed BFF client interfaces while sharing one framework version, one router, one design system, and one client cache—avoiding MFE bundle duplication, shared-state fragmentation, and cross-team version skew.
+- **Ownership Without Runtime Tax:** Each package has explicit `CODEOWNERS`, independent unit tests, and generated ConnectRPC client interfaces while sharing one framework version (React 19), one router, one design system (Tailwind CSS), and one client cache—avoiding MFE bundle duplication, shared-state fragmentation, and cross-team version skew.
 
 ### 3. Thin Go BFF (`stravin-web`) Responsibilities
 
@@ -229,3 +231,4 @@ export interface DiffRenderer {
 - [UI Design Overview & Shell](../ui/index.md) — Canonical Stravin brand tokens, shell architecture, and GitHub ⟷ Stravin UX mapping.
 - [Platform Products ⟷ Stravin Auth Interface](../interfaces/platform-auth.md) — Session, JWKS, and revocation contracts used by `stravin-web`.
 - [Platform Events ⟷ Stravin Notify Interface](../interfaces/platform-notify.md) — In-app inbox and WebSocket/SSE notification delivery proxied through `stravin-web`.
+- [Full-Stack Build Waves](../roadmap/full-stack-waves.md) — 4-wave implementation plan taking Stravin from `stravin-dev/core` `v1.12.1` to the full `stravin-dev/platform` stack and React 19 web UI.

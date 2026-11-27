@@ -40,6 +40,9 @@ nav = [
     { "ADR-0003: Platform Auth & SSO Seam" = "adr/0003-platform-auth-and-sso-seam.md" },
     { "ADR-0004: Web Frontend Stack (SPA + Go BFF)" = "adr/0004-frontend-stack-spa-go-bff.md" },
   ] },
+  { "Roadmap" = [
+    { "Full-Stack Build Waves" = "roadmap/full-stack-waves.md" },
+  ] },
   { "Operations & Tooling" = [
     { "Local Development" = "operations/local-dev.md" },
     { "Telemetry & Observability" = "operations/telemetry.md" },
