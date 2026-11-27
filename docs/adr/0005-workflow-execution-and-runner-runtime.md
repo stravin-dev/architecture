@@ -35,7 +35,7 @@ flowchart TB
     end
 
     subgraph HostedPool["Hosted MicroVM Pool (Firecracker / Kata, <300ms Cold Start)"]
-        HostedRunner["stravin-runner (Static Go Binary)\nComposite + OCI + Optional Node/Wasm Shim"]
+        HostedRunner["stravin-runner (Static Go Binary)\nComposite + OCI + Optional Wasm"]
         HostedActions["stravin-actions/*\ncheckout, cache, upload/download-artifact,\nsetup-go, setup-node, setup-python"]
         HostedRunner --> HostedActions
     end
@@ -76,9 +76,9 @@ Workflows are authored as declarative YAML files under **`.stravin/workflows/*.y
         - `STRAVIN_STATE` — Private state shared between a step's `pre`, `main`, and `post` hooks.
     - Legacy stdout magic-string directives are **not supported**, removing log-injection command-smuggling vectors.
 
-### 2. Action Execution Runtimes (OCI/Wasm-First Hybrid)
+### 2. Action Execution Runtimes (Composite + OCI + Optional Wasm)
 
-Every `uses:` step executes through one of three runtime tiers, prioritizing zero-overhead composition and hermetic OCI containers while retaining an optional compatibility bridge:
+Every `uses:` step executes through one of three runtime tiers, prioritizing zero-overhead composition, hermetic digest-pinned OCI containers, and optional zero-dependency Wasm sandboxes:
 
 1. **Composite Actions (First-Class, Default for Multi-Step Tooling):**
     - Declared with `runs: using: 'composite'` in `action.yml`.
@@ -86,9 +86,12 @@ Every `uses:` step executes through one of three runtime tiers, prioritizing zer
 2. **OCI Container Actions (First-Class, Default for Packaged Logic):**
     - Declared with `runs: using: 'oci'` referencing a digest-pinned OCI image (`image: oci://registry.example.com/org/action@sha256:...`).
     - Runs inside a hardened container sandbox with a read-only root filesystem, explicit workspace bind mount, dropped Linux capabilities, and inputs injected via `INPUT_<NAME>` environment variables.
-3. **Optional Sandboxed Node.js / Wasm Action Runtime Shim:**
-    - Declared with `runs: using: 'wasm'` (executed via an embedded `wazero` runtime inside `stravin-runner` with zero external host dependencies) or `runs: using: 'node'` (executed inside an on-demand sandboxed OCI Node.js shim container).
-    - Maps `with:` inputs onto the standard `INPUT_<NAME>` environment bridge and invokes bundled entrypoints (`dist/index.js` or `action.wasm`), allowing compatibility with existing bundled JavaScript actions **without requiring Node.js to be pre-installed in minimal microVM rootfs images**.
+3. **Optional Sandboxed Wasm Actions (`using: 'wasm'`):**
+    - Declared with `runs: using: 'wasm'` and executed via an embedded `wazero` runtime inside `stravin-runner` with zero external host dependencies.
+    - Maps `with:` inputs onto the standard `INPUT_<NAME>` environment bridge and invokes bundled `action.wasm` entrypoints, providing portable cross-OS execution (Linux, macOS, Windows) with minimal startup overhead.
+- **Why Host `using: node` Is Omitted:**
+    - Any author who wants Node.js or JavaScript execution can package it in a digest-pinned OCI container (`using: 'oci'`) without forcing `stravin-runner` to ship, patch, or maintain host Node.js runtimes across EOL cycles.
+    - `using: 'composite'` (shell and static Go binaries) and `using: 'wasm'` handle cross-OS portability (Linux, macOS, Windows) and host `PATH`/toolchain setup (`setup-*`) without introducing Node.js runtime debt.
 - **Mandatory Pinning Policy for External `uses:` References:**
     - External `uses:` references MUST be pinned to a **full commit SHA** (40-char SHA-1 or 64-char SHA-256 matching repository `object_format`) or an **immutable OCI image digest** (`@sha256:...`).
     - Mutable tag or branch references (e.g., `@v1`, `@main`) on third-party repositories are rejected by policy unless explicitly exempted in tenant/repository settings; first-party `stravin-actions/*` repositories publish immutable signed releases and major-version tags under tenant policy control.
@@ -144,11 +147,11 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 
 | Alternative | Summary | Why Rejected |
 | :--- | :--- | :--- |
-| **Option A: Full JS-Mandatory Parity** | Require a full Node.js / .NET runner agent and JavaScript runtime baked into every runner VM image so every action runs as a host JS process. | Bloats microVM rootfs images and slows Firecracker/Kata cold starts past `< 300 ms`; forces every third-party microVM provider to ship and patch Node.js/.NET runtimes; inherits legacy stdout command-injection and unpinned-tag supply-chain hazards. |
+| **Option A: Host Node.js / JS-Mandatory Parity (`using: node`)** | Require a full Node.js / .NET runner agent or host `using: node` runtime shim so actions execute as Node.js processes. | Bloats microVM rootfs images and slows Firecracker/Kata cold starts past `< 300 ms`; forces `stravin-runner` and third-party microVM providers to ship and patch Node.js runtimes across EOL cycles when authors can already package Node.js inside a digest-pinned `using: oci` container; inherits legacy stdout command-injection and unpinned-tag supply-chain hazards. |
 | **Option C: Pure OCI Step Pipelines** | Require every single workflow step to run as an isolated OCI container image with no composite action expansion or lightweight host-step execution. | Adds container-pull and layer-unpack latency to trivial steps (`checkout`, `cache`, `setup-go`); breaks ergonomic multi-step composition; complicates Docker-in-Docker and nested tooling inside ephemeral microVMs. |
 | **Option D: Programmable Container DAGs / BuildKit SDKs** | Author CI pipelines in general-purpose programming languages (Go, TypeScript, Python SDKs) compiling to BuildKit LLB graphs instead of declarative YAML. | Raises the onboarding bar for teams expecting familiar declarative `.stravin/workflows/*.yml` files; shifts DAG state out of Run's Temporal engine, weakening `tree_oid` verdict reuse, per-check Gate fail-fast eviction, and visual DAG inspection; poorly matched to third-party microVM providers expecting job-level `runs-on` webhooks. |
 
-**Why Option B Wins:** Option B combines familiar, low-friction declarative YAML ergonomics (`.stravin/workflows/*.yml`, `stravin-actions/*`, composite actions) with modern supply-chain and runtime hygiene (strict expression-injection guardrails, file-based step commands, mandatory SHA/digest pinning, zero-dependency static Go `stravin-runner`, OCI/Wasm-first execution) while giving third-party microVM runner providers first-class Day-1 hooks (`run.job.queued`, single-use JIT OIDC tokens, open-source static runner binary, and overridable `STRAVIN_CACHE_URL`/`STRAVIN_RUNTIME_URL`).
+**Why Option B Wins:** Option B combines familiar, low-friction declarative YAML ergonomics (`.stravin/workflows/*.yml`, `stravin-actions/*`, composite actions) with modern supply-chain and runtime hygiene (strict expression-injection guardrails, file-based step commands, mandatory SHA/digest pinning, zero-dependency static Go `stravin-runner`, and `composite` + `oci` + optional `wasm` execution with zero host Node.js runtime debt) while giving third-party microVM runner providers first-class Day-1 hooks (`run.job.queued`, single-use JIT OIDC tokens, open-source static runner binary, and overridable `STRAVIN_CACHE_URL`/`STRAVIN_RUNTIME_URL`).
 
 ## Consequences
 
@@ -161,13 +164,13 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 
 ### Negative / Trade-offs
 
-- **Node.js action shim latency:** Legacy bundled Node.js actions running via the optional sandboxed OCI Node.js shim incur a small container startup cost compared to native composite or Wasm actions (mitigated by keeping all first-party `stravin-actions/*` on composite/Wasm/static helpers).
+- **No host `using: node` runtime:** Authors bringing Node.js or JavaScript actions must package them as digest-pinned OCI containers (`using: 'oci'`) or port them to `composite` / `wasm` actions, incurring container startup latency for Node.js-packaged actions (mitigated by keeping all first-party `stravin-actions/*` on `composite`, `wasm`, or static Go helpers).
 - **Maintenance of `stravin-actions/*` repositories:** Owning first-party repositories (`checkout`, `cache`, `upload-artifact`, `download-artifact`, `setup-*`) requires dedicated release automation, security patching, and cross-arch (`amd64`/`arm64`) builds.
 - **Strict expression lint friction:** Developers migrating scripts that directly interpolate untrusted event fields into `run:` blocks will encounter validation errors until those values are moved into `env:` bindings (mitigated by clear diagnostic messages with exact copy-paste fixes).
 
 ## Undo / Rollback Path
 
-- **Adding or retiring action runtime tiers:** Because `stravin-runner` dispatches steps behind a `StepRuntime` interface (`composite`, `oci`, `wasm`, `node`), adding a new runtime tier or deprecating the optional Node.js shim requires no change to Temporal DAG orchestration, Core Git tokens, or Gate verdict contracts.
+- **Adding or retiring action runtime tiers:** Because `stravin-runner` dispatches steps behind a `StepRuntime` interface (`composite`, `oci`, `wasm`), adding a new runtime tier or retiring optional Wasm support requires no change to Temporal DAG orchestration, Core Git tokens, or Gate verdict contracts.
 - **Extending workflow syntax:** `.stravin/workflows/*.yml` carries an explicit schema version; additive YAML fields follow `N / N-1` compatibility without breaking existing pipelines or third-party `stravin-runner` binaries.
 - **Disabling endpoint overrides per tenant:** Overriding `STRAVIN_CACHE_URL` and `STRAVIN_RUNTIME_URL` is controlled by runner-pool policy in `stravin-run`, allowing tenants with strict data-residency requirements to pin all cache and artifact traffic to Stravin-managed S3 endpoints.
 
