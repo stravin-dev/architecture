@@ -157,7 +157,7 @@ flowchart LR
 1. **Temporal in Local Compose:**
     - Add `temporal server start-dev` (with Web UI) to the unified Docker Compose stack alongside per-service PostgreSQL schemas (`run`, `gate`).
 2. **`stravin-run` (CI / Runners):**
-    - Temporal DAG workflows executing `.stravin/workflows/*.yml` pipeline graphs with `tree_oid` verdict reuse and `<200ms` cancellation propagation on supersede/eviction.
+    - Temporal DAG workflows executing `.stravin/workflows/*.yml` and `.stravin/workflows/*.cue` pipeline graphs via the CUE `#Workflow` schema and canonical Protobuf Workflow IR (reserving `on.workflow_call` and the `WorkflowCallJob` job-level `uses:` union variant per [ADR-0005](../adr/0005-workflow-execution-and-runner-runtime.md)), with `tree_oid` verdict reuse and `<200ms` cancellation propagation on supersede/eviction.
     - Static Go **`stravin-runner`** (hosted ephemeral pool + `stravin-runner local` Docker parity with embedded loopback `STRAVIN_CACHE_URL` / `STRAVIN_RUNTIME_URL`), OCI/Wasm-first hybrid action execution, first-party **`stravin-actions/*`** repositories (`checkout`, `cache`, `upload-artifact`, `download-artifact`, `setup-*`), presigned multipart artifacts & branch-isolated cache service ([Run Artifacts & Cache](../interfaces/run-artifacts-cache.md)), and Day-1 **third-party microVM runner hooks** (`run.job.queued` webhook, single-use JIT OIDC registration tokens, overridable cache/artifact endpoints) per [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md) and [ADR-0005](../adr/0005-workflow-execution-and-runner-runtime.md).
     - Real-time ANSI step log streaming and `STRAVIN_RUN` JetStream check/verdict events.
 3. **`stravin-gate` (Merge Queue & Policy):**
@@ -191,6 +191,8 @@ flowchart LR
     - Pluggable `IdentityProvider` (native OIDC including Google OIDC + optional WorkOS SSO adapter) and `DirectorySyncAdapter` (native SCIM 2.0 + optional WorkOS Directory Sync adapter) per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md).
 5. **Phase 2 `ImageDiffRenderer`:**
     - Register the lazy-loaded `ImageDiffRenderer` chunk inside `packages/review/src/diff/` supporting **`2-up`**, **`Swipe`**, **`Onion-Skin`**, and **`Pixel Diff`** view modes over `stravin-web`'s sandboxed blob proxy.
+6. **Reusable Workflow Calls (`workflow_call`):**
+    - Activate the reserved `on.workflow_call` / `WorkflowCallJob` seam in `stravin-run` with same-repo and cross-repo full-SHA-pinned resolution, Temporal subgraph / child-workflow expansion enforcing cycle detection and max nesting depth (`<= 4`), and strict explicit `secrets:` isolation (`secrets: inherit` forbidden across untrusted or external repository boundaries) per [ADR-0005](../adr/0005-workflow-execution-and-runner-runtime.md).
 
 ### Wave 4 Exit Criteria
 
@@ -198,6 +200,7 @@ flowchart LR
 - Mentioning a reviewer delivers an RBAC-checked real-time in-app toast and respects configured notification channels.
 - Hovering a symbol inside a PR diff surfaces type/definition context from `stravin-index`.
 - PRs modifying raster images render in `2-up`, `Swipe`, `Onion-Skin`, and `Pixel Diff` modes without loading image codec bundles on pure-code PRs.
+- Same-repo and cross-repo SHA-pinned `workflow_call` jobs expand cleanly within max nesting depth (`<= 4`), reject cyclic references, and enforce explicit `secrets:` passing across external repository boundaries.
 
 ---
 

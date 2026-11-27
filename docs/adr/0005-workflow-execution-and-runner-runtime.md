@@ -98,6 +98,13 @@ Because workflows are authored in untrusted repository commits and pull requests
 - **Bounded Eval Budget:** Compilation enforces a `<= 2s` timeout, maximum AST depth and node caps, `<= 256` expanded matrix jobs, and isolated memory-capped evaluation to mitigate CUE disjunction or comprehension blowup.
 - **Post-IR Security Pass:** `${{ }}` runtime expression validation, untrusted-context shell-injection blocking, and SHA/digest pinning run uniformly on the compiled Protobuf Workflow IR regardless of source format.
 
+#### Reusable Workflow Calls (`workflow_call`) Seam
+
+Reusable workflow composition is phased across Wave 3 and Wave 4 without introducing breaking schema or IR migrations:
+
+- **Wave 3 (Schema & IR Reservation):** Both the canonical CUE `#Workflow` schema and Protobuf **Workflow IR** reserve `on.workflow_call` (typed `inputs`, `outputs`, and declared `secrets`) alongside a job-level `uses:` union variant (`WorkflowCallJob`) from Day 1, ensuring reusable workflow calls activate with zero breaking IR or runner protocol changes.
+- **Wave 4 (Full Execution):** `stravin-run` implements same-repo and cross-repo full-SHA-pinned `workflow_call` resolution, Temporal subgraph / child-workflow expansion with cycle detection and max nesting depth (`<= 4`), and strict secret-passing isolation (explicit `secrets:` mapping required; `secrets: inherit` is forbidden across untrusted or external repository boundaries).
+
 ### 2. Action Execution Runtimes (Composite + OCI + Optional Wasm)
 
 Every `uses:` step executes through one of three runtime tiers, prioritizing zero-overhead composition, hermetic digest-pinned OCI containers, and optional zero-dependency Wasm sandboxes:
@@ -201,7 +208,7 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 ## Undo / Rollback Path
 
 - **Adding or retiring action runtime tiers:** Because `stravin-runner` dispatches steps behind a `StepRuntime` interface (`composite`, `oci`, `wasm`), adding a new runtime tier or retiring optional Wasm support requires no change to Temporal DAG orchestration, Core Git tokens, or Gate verdict contracts.
-- **Extending workflow syntax and frontends:** The canonical `#Workflow` CUE schema carries an explicit schema version with `N / N-1` additive compatibility across `.stravin/workflows/*.yml` and `.stravin/workflows/*.cue`, and the `WorkflowCompiler -> WorkflowIR` seam isolates authoring formats from execution—so disabling `.cue` per tenant or adding/retiring optional future frontends (`Starlark`, `Pkl`) requires zero changes to Temporal orchestration, third-party `stravin-runner` binaries, `stravin-actions/*`, or `stravin-gate`.
+- **Extending workflow syntax and frontends:** The canonical `#Workflow` CUE schema carries an explicit schema version with `N / N-1` additive compatibility across `.stravin/workflows/*.yml` and `.stravin/workflows/*.cue`, and the `WorkflowCompiler -> WorkflowIR` seam isolates authoring formats from execution—so disabling `.cue` per tenant, gating Wave 4 `workflow_call` execution behind tenant policy (using the Wave 3 reserved `on.workflow_call` / `WorkflowCallJob` IR seam), or adding/retiring optional future frontends (`Starlark`, `Pkl`) requires zero changes to Temporal orchestration, third-party `stravin-runner` binaries, `stravin-actions/*`, or `stravin-gate`.
 - **Disabling endpoint overrides per tenant:** Overriding `STRAVIN_CACHE_URL` and `STRAVIN_RUNTIME_URL` is controlled by runner-pool policy in `stravin-run`, allowing tenants with strict data-residency requirements to pin all cache and artifact traffic to Stravin-managed S3 endpoints.
 
 ## Related Documents
@@ -213,4 +220,4 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 - [Run Artifacts & Cache Interface](../interfaces/run-artifacts-cache.md) — Dual-mode `STRAVIN_RUNTIME_URL` / `STRAVIN_CACHE_URL` wire API, direct-to-S3 presigned multipart flows, branch/pool cache isolation, and `stravin-actions/*` schemas.
 - [Run ⟷ Gate Interface](../interfaces/run-gate.md) — Speculative merge-queue batch builds, `< 200 ms` cancellation, and partitioned `tree_oid` verdict reuse.
 - [External Webhooks Interface](../interfaces/external-webhooks.md) — Signed outbound `run.job.queued` webhook delivery via `stravin-webhooks`.
-- [Full-Stack Build Waves](../roadmap/full-stack-waves.md) — Wave 3 implementation deliverables for `stravin-run`, `stravin-runner`, and `stravin-actions/*`.
+- [Full-Stack Build Waves](../roadmap/full-stack-waves.md) — Wave 3 implementation deliverables for `stravin-run`, `stravin-runner`, `stravin-actions/*`, and `workflow_call` schema/IR reservation, plus Wave 4 reusable workflow call execution.
