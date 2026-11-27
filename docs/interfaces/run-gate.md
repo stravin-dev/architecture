@@ -2,7 +2,7 @@
 
 This specification defines the contract between **Stravin Run** (CI runners and pipeline execution) and **Stravin Gate** (speculative merge queues and merge policy).
 
-> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Run nor Stravin Gate is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification. External runner pool isolation, `app_id` verdict binding, partitioned `tree_oid` reuse, and Run-only `INFRA_ERROR` boundaries follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md).
+> **Contract Status:** **Proposed Contract (vNext)** — Neither Stravin Run nor Stravin Gate is implemented in `stravin-dev/core` v1.12.x. Both teams build directly to this specification. External runner pool isolation, `app_id` verdict binding, partitioned `tree_oid` reuse, and Run-only `INFRA_ERROR` boundaries follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md); declarative workflow execution and the `stravin-runner` runtime follow [ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime](../adr/0005-workflow-execution-and-runner-runtime.md).
 
 ## 1. Boundary & Ownership
 
@@ -181,3 +181,8 @@ Published to stream `STRAVIN_RUN` with NATS headers `Nats-Msg-Id: <idempotency_k
 - `fixtures/run-gate/speculative-build-pass.json` — Request, `202 Accepted`, and `STRAVIN_RUN` JetStream `gate_verdict.ready` (`PASSED`, including one `reused_from_tree_oid: true` check).
 - `fixtures/run-gate/fail-fast-cancel.json` — Early `gate_check.completed` (`failure`) JetStream message triggering `POST /v1/gate-builds/{id}/cancel`.
 - `fixtures/run-gate/infra-error-requeue.json` — `INFRA_ERROR` verdict fixture verifying non-blame requeue behavior.
+
+## Related Documents
+
+- [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md)
+- [ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime](../adr/0005-workflow-execution-and-runner-runtime.md)

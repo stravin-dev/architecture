@@ -1,6 +1,6 @@
 # Stravin Core ⟷ Stravin Run
 
-This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Run** (ephemeral CI build/test runners and pipeline scheduler). External runner token scoping, `bundle-uri` gating, and `jti` revocation follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md).
+This specification defines the contract between **Stravin Core** (bare Git storage engine) and **Stravin Run** (ephemeral CI build/test runners and pipeline scheduler). External runner token scoping, `bundle-uri` gating, and `jti` revocation follow [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md); workflow YAML execution, `stravin-runner`, and `stravin-actions/checkout` follow [ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime](../adr/0005-workflow-execution-and-runner-runtime.md).
 
 ## 1. Boundary & Ownership
 
@@ -159,3 +159,8 @@ Response (`200 OK`):
 - `fixtures/core-run/v2-cacheable-fetch.pkt` — Raw Protocol v2 `command=fetch` pkt-line request verified against `edge.IsCacheableV2FullCloneFetch`.
 - `fixtures/core-run/nats-tag-and-branch.json` — NATS JetStream `stravin.core.<tenant>.<repo>.ref.updated` messages for branch push, tag push, and branch deletion trigger matching.
 - `fixtures/core-run/scoped-token-response.json` — Token mint request/response schema and expiry validation fixture.
+
+## Related Documents
+
+- [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md)
+- [ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime](../adr/0005-workflow-execution-and-runner-runtime.md)

@@ -39,6 +39,7 @@ nav = [
     { "ADR-0002: External Runner Seam & OIDC Auth" = "adr/0002-external-runner-seam-and-oidc-auth.md" },
     { "ADR-0003: Platform Auth & SSO Seam" = "adr/0003-platform-auth-and-sso-seam.md" },
     { "ADR-0004: Web Frontend Stack (SPA + Go BFF)" = "adr/0004-frontend-stack-spa-go-bff.md" },
+    { "ADR-0005: Workflow Execution & Runner Runtime" = "adr/0005-workflow-execution-and-runner-runtime.md" },
   ] },
   { "Roadmap" = [
     { "Full-Stack Build Waves" = "roadmap/full-stack-waves.md" },
