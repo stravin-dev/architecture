@@ -1,4 +1,4 @@
-# ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime
+# ADR-0005: Declarative Workflow Execution, First-Party Action Repositories, and Runner Runtime
 
 - **Status:** Proposed
 - **Date:** 2026-11-26
@@ -21,13 +21,13 @@ Before Wave 3 builds `stravin-run` and its runner agent in `stravin-dev/platform
 
 ## Decision
 
-We adopt **Option B: Compatible Declarative YAML + OCI/Wasm-First Hybrid Action Runtimes + Static Go `stravin-runner` + Day-1 Third-Party MicroVM Runner Hooks**.
+We adopt **Option B: CUE-Backed Declarative Workflows (YAML + CUE) + OCI/Wasm-First Hybrid Action Runtimes + Static Go `stravin-runner` + Day-1 Third-Party MicroVM Runner Hooks**.
 
 ```mermaid
 flowchart TB
     subgraph ControlPlane["Stravin Control Plane (Cilium eBPF SPIFFE mTLS)"]
         direction TB
-        Temporal["Stravin Run (Temporal DAG)\nCompile to Workflow IR (YAML v1)\nMatrix Fan-Out, <200ms Cancel, tree_oid Reuse"]
+        Temporal["Stravin Run (Temporal DAG)\nCUE v1 Engine (.yml + .cue) -> Workflow IR\nMatrix Fan-Out, <200ms Cancel, tree_oid Reuse"]
         Auth["stravin-auth (External OIDC App Seam)\nSingle-Use JIT Runner Registration Token\n(6-Tuple Job-Lease Bound, Zero Static Secrets)"]
         Core["Stravin Core (stravin-edge)\ncommit_oid-Pinned git:read (TTL <= 120s)\nValkey+S3 Pack Cache & Opt-In bundle-uri"]
         Webhooks["stravin-webhooks\nOutbound run.job.queued Event\n(Labels + Pool Only, Zero Git Tokens)"]
@@ -62,7 +62,7 @@ flowchart TB
 
 ### 1. Workflow Syntax & Expression Safety
 
-Workflows are authored as declarative YAML files under **`.stravin/workflows/*.yml`** (and `.yaml`), fetched at the exact triggering `commit_oid`:
+Workflows are authored as declarative YAML (**`.stravin/workflows/*.yml`**, `*.yaml`, YAML 1.2) or CUE (**`.stravin/workflows/*.cue`**) files, fetched at the exact triggering `commit_oid` and compiled against one canonical CUE `#Workflow` schema:
 
 - **Core Schema:** Supports `on` triggers (`push`, `pull_request`, `merge_group`, `workflow_dispatch`, `schedule`), `jobs`, `needs` (DAG edges), `runs-on` (label selector routing), `strategy.matrix` (with `include`/`exclude`/`fail-fast`), `services` (sidecar containers attached to the job network), and `steps` (`name`, `id`, `if`, `uses`, `with`, `run`, `env`, `working-directory`, `continue-on-error`, `timeout-minutes`).
 - **Expression Engine & Shell-Injection Guardrails:**
@@ -76,13 +76,27 @@ Workflows are authored as declarative YAML files under **`.stravin/workflows/*.y
         - `STRAVIN_STATE` — Private state shared between a step's `pre`, `main`, and `post` hooks.
     - Legacy stdout magic-string directives are **not supported**, removing log-injection command-smuggling vectors.
 
-#### Canonical Workflow IR & Pluggable Frontend Seam
+#### CUE v1 Compiler Engine, Canonical Workflow IR & Pluggable Frontends
 
 `stravin-run`'s Temporal DAG engine and `stravin-runner` execute **only a canonical Protobuf Workflow IR** (`WorkflowSpec`, `JobSpec`, `StepSpec`), decoupled from authoring syntax:
 
-- **v1 Default Frontend:** Declarative YAML (`.stravin/workflows/*.yml`, `*.yaml`) sits behind a strict `WorkflowCompiler` interface (`Compile -> WorkflowIR`), recommending YAML literal blocks (`run: |`) or `.stravin/scripts/*.sh` for multi-line shell logic.
-- **Pluggable Future Frontends (CUE / Starlark / Pkl):** Additional deterministic, sandboxed frontends (`.cue`, `.star`, `.pkl`) with raw multiline strings (`#"""..."""#` / `r"""..."""`), native typing, and IDE formatting/linting can compile into the exact same Workflow IR with zero changes to Temporal orchestration, `stravin-runner`, `stravin-actions/*`, or `stravin-gate`.
-- **Server-Side Compilation Guardrails:** All frontends execute hermetic, non-I/O evaluation with strict CPU, memory, and timeout limits before emitting the validated Workflow IR—enforcing the exact same untrusted-context shell-injection and SHA/digest pinning policies on the compiled IR.
+- **CUE (`cuelang.org/go`) as the v1 Schema & Compiler Engine (Day 1):** Both `.stravin/workflows/*.yml` (`*.yaml`, YAML 1.2) and `.stravin/workflows/*.cue` are unified against one canonical `#Workflow` CUE schema behind the `WorkflowCompiler -> WorkflowIR` seam to emit the validated Protobuf **Workflow IR** (`WorkflowSpec`, `JobSpec`, `StepSpec`).
+- **Dual-Format Ergonomics from One Schema:**
+    - **`.yml` / `.yaml` (YAML 1.2):** The single `#Workflow` CUE schema auto-exports JSON Schema for `.yml` IDE autocomplete and linting; YAML literal blocks (`run: |`) or `.stravin/scripts/*.sh` are recommended for multi-line shell logic.
+    - **`.cue` (Native CUE):** Authors get native CUE LSP support, `cue fmt`, raw `#"""..."""#` multiline shell blocks, and DRY workflow reuse via `#Definitions`, hidden `_fields`, and `&` unification.
+- **Strict 1-File = 1-Workflow Isolation (No Cross-File Unification):** Every workflow file in `.stravin/workflows/` (`*.yml`, `*.yaml`, `*.cue`) is compiled **independently** into its own `WorkflowSpec` keyed by relative file path. Files in `.stravin/workflows/` (including mixed `.yml` and `.cue` files, or same-stem `ci.yml` + `ci.cue`) are **never** loaded as one shared CUE package or collapsed/unified together.
+- **Shared CUE Helpers:** Reusable `#Definitions` and hidden `_fields` live outside `.stravin/workflows/` (e.g., `.stravin/lib/*.cue`) and are explicitly imported by individual `.stravin/workflows/*.cue` files.
+- **Pluggable Future Frontends (`Starlark` / `Pkl`):** Optional deterministic, sandboxed frontends (`.star`, `.pkl`) can plug into the same `WorkflowCompiler -> WorkflowIR` seam with zero changes to Temporal orchestration, `stravin-runner`, `stravin-actions/*`, or `stravin-gate`.
+
+#### Untrusted Workflow Parsing & Evaluation Guardrails
+
+Because workflows are authored in untrusted repository commits and pull requests, compilation enforces strict resource and security boundaries before emitting Workflow IR:
+
+- **Valid YAML Anchors/Aliases with Expansion Caps:** Legitimate YAML anchors and aliases (`&anchor`, `*alias`) are permitted for DRY workflows, with strict caps on raw file size (`<= 512 KiB`), alias expansion depth (`<= 4`), expanded AST node count, and compiled Workflow IR size (`<= 1 MiB`) to prevent exponential alias-bomb DoS.
+- **Duplicate Key Rejection & YAML 1.2:** Duplicate YAML keys are strictly rejected at decode time; YAML 1.2 parsing ensures keys and scalars such as `on`, `no`, and `yes` remain strings rather than booleans.
+- **Pure Hermetic `cuecontext` Evaluation:** All `tool/*` CLI packages (`tool/exec`, `tool/http`, `tool/file`) are disabled and network or out-of-repo imports are blocked; evaluation allows only the built-in `#Workflow` schema and repo-local pure `.cue` files under `.stravin/`.
+- **Bounded Eval Budget:** Compilation enforces a `<= 2s` timeout, maximum AST depth and node caps, `<= 256` expanded matrix jobs, and isolated memory-capped evaluation to mitigate CUE disjunction or comprehension blowup.
+- **Post-IR Security Pass:** `${{ }}` runtime expression validation, untrusted-context shell-injection blocking, and SHA/digest pinning run uniformly on the compiled Protobuf Workflow IR regardless of source format.
 
 ### 2. Action Execution Runtimes (Composite + OCI + Optional Wasm)
 
@@ -165,12 +179,13 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 | **Option C: Pure OCI Step Pipelines** | Require every single workflow step to run as an isolated OCI container image with no composite action expansion or lightweight host-step execution. | Adds container-pull and layer-unpack latency to trivial steps (`checkout`, `cache`, `setup-go`); breaks ergonomic multi-step composition; complicates Docker-in-Docker and nested tooling inside ephemeral microVMs. |
 | **Option D: Programmable Container DAGs / BuildKit SDKs** | Author CI pipelines in general-purpose programming languages (Go, TypeScript, Python SDKs) compiling to BuildKit LLB graphs instead of declarative YAML. | Raises the onboarding bar for teams expecting familiar declarative `.stravin/workflows/*.yml` files; shifts DAG state out of Run's Temporal engine, weakening `tree_oid` verdict reuse, per-check Gate fail-fast eviction, and visual DAG inspection; poorly matched to third-party microVM providers expecting job-level `runs-on` webhooks. |
 
-**Why Option B Wins:** Option B combines familiar, low-friction declarative YAML ergonomics (`.stravin/workflows/*.yml`, `stravin-actions/*`, composite actions) with modern supply-chain and runtime hygiene (strict expression-injection guardrails, file-based step commands, mandatory SHA/digest pinning, zero-dependency static Go `stravin-runner`, and `composite` + `oci` + optional `wasm` execution with zero host Node.js runtime debt) while giving third-party microVM runner providers first-class Day-1 hooks (`run.job.queued`, single-use JIT OIDC tokens, open-source static runner binary, and overridable `STRAVIN_CACHE_URL`/`STRAVIN_RUNTIME_URL`).
+**Why Option B Wins:** Option B combines familiar, low-friction declarative ergonomics (`.stravin/workflows/*.yml` and `.stravin/workflows/*.cue` compiled through one Day-1 CUE `#Workflow` schema engine, `stravin-actions/*`, composite actions) with modern supply-chain and runtime hygiene (bounded hermetic parsing/evaluation guardrails, strict expression-injection guardrails, file-based step commands, mandatory SHA/digest pinning, zero-dependency static Go `stravin-runner`, and `composite` + `oci` + optional `wasm` execution with zero host Node.js runtime debt) while giving third-party microVM runner providers first-class Day-1 hooks (`run.job.queued`, single-use JIT OIDC tokens, open-source static runner binary, and overridable `STRAVIN_CACHE_URL`/`STRAVIN_RUNTIME_URL`).
 
 ## Consequences
 
 ### Positive
 
+- **Unified CUE v1 schema and safe authoring (`.yml` + `.cue`):** One `#Workflow` CUE schema auto-exports JSON Schema for `.yml` IDE tooling while giving `.cue` authors `cue fmt`, raw `#"""..."""#` blocks, and DRY `#Definitions`/`&` reuse under hermetic, bounded evaluation guardrails.
 - **Fast, lean microVM cold starts:** A single static Go `stravin-runner` with zero .NET/Node.js host dependencies keeps Firecracker/Kata rootfs images minimal and cold starts `< 300 ms`.
 - **Strong default supply-chain and shell safety:** Blocking untrusted `${{ }}` interpolation in `run:` scripts, eliminating stdout magic commands, and enforcing full commit-SHA / OCI-digest pinning prevent entire classes of CI exploitation at parse time.
 - **1:1 local and production parity:** `stravin-runner local` with an embedded loopback HTTP cache/artifact server exercises the exact same `STRAVIN_RUNTIME_URL` / `STRAVIN_CACHE_URL` contract as production S3-backed endpoints.
@@ -178,6 +193,7 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 
 ### Negative / Trade-offs
 
+- **CUE evaluation complexity and parser hardening:** Compiling both YAML 1.2 and `.cue` through `cuelang.org/go` requires maintaining strict memory, AST, alias-expansion, and `<= 2s` timeout caps to defend against untrusted workflow DoS (mitigated by pure hermetic `cuecontext` evaluation and bounded IR compilation).
 - **No host `using: node` runtime:** Authors bringing Node.js or JavaScript actions must package them as digest-pinned OCI containers (`using: 'oci'`) or port them to `composite` / `wasm` actions, incurring container startup latency for Node.js-packaged actions (mitigated by keeping all first-party `stravin-actions/*` on `composite`, `wasm`, or static Go helpers).
 - **Maintenance of `stravin-actions/*` repositories:** Owning first-party repositories (`checkout`, `cache`, `upload-artifact`, `download-artifact`, `setup-*`) requires dedicated release automation, security patching, and cross-arch (`amd64`/`arm64`) builds.
 - **Strict expression lint friction:** Developers migrating scripts that directly interpolate untrusted event fields into `run:` blocks will encounter validation errors until those values are moved into `env:` bindings (mitigated by clear diagnostic messages with exact copy-paste fixes).
@@ -185,7 +201,7 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 ## Undo / Rollback Path
 
 - **Adding or retiring action runtime tiers:** Because `stravin-runner` dispatches steps behind a `StepRuntime` interface (`composite`, `oci`, `wasm`), adding a new runtime tier or retiring optional Wasm support requires no change to Temporal DAG orchestration, Core Git tokens, or Gate verdict contracts.
-- **Extending workflow syntax and frontends:** `.stravin/workflows/*.yml` carries an explicit schema version with `N / N-1` additive compatibility, and the `WorkflowCompiler` seam isolates authoring formats from the canonical Protobuf Workflow IR—so adding, deprecating, or disabling alternative frontends (CUE, Starlark, Pkl) requires zero changes to Temporal orchestration, third-party `stravin-runner` binaries, `stravin-actions/*`, or `stravin-gate`.
+- **Extending workflow syntax and frontends:** The canonical `#Workflow` CUE schema carries an explicit schema version with `N / N-1` additive compatibility across `.stravin/workflows/*.yml` and `.stravin/workflows/*.cue`, and the `WorkflowCompiler -> WorkflowIR` seam isolates authoring formats from execution—so disabling `.cue` per tenant or adding/retiring optional future frontends (`Starlark`, `Pkl`) requires zero changes to Temporal orchestration, third-party `stravin-runner` binaries, `stravin-actions/*`, or `stravin-gate`.
 - **Disabling endpoint overrides per tenant:** Overriding `STRAVIN_CACHE_URL` and `STRAVIN_RUNTIME_URL` is controlled by runner-pool policy in `stravin-run`, allowing tenants with strict data-residency requirements to pin all cache and artifact traffic to Stravin-managed S3 endpoints.
 
 ## Related Documents
