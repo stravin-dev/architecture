@@ -123,7 +123,7 @@ Stravin maintains a focused set of official, audited first-party action reposito
         - `STRAVIN_RUNTIME_URL` — Job artifact and step-metadata API endpoint.
         - `STRAVIN_CACHE_URL` — Content-addressed build cache endpoint.
         - `STRAVIN_RUNTIME_TOKEN` — Scoped per-job bearer token.
-    - Because `stravin-actions/upload-artifact`, `download-artifact`, and `cache` talk exclusively to these HTTP endpoints, local runs and production S3-backed runs exercise the **exact same action code paths 1:1**.
+    - Because `stravin-actions/upload-artifact`, `download-artifact`, and `cache` talk exclusively to these HTTP endpoints, local runs and production S3-backed runs exercise the **exact same action code paths 1:1** (wire contract, presigned multipart flows, and cache-poisoning isolation defined in [Run Artifacts & Cache Interface](../interfaces/run-artifacts-cache.md)).
 
 ### 5. Third-Party Ephemeral MicroVM Runner Hooks (Day-1 Interoperability)
 
@@ -142,6 +142,12 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 4. **Overridable Cache & Artifact Endpoints (`STRAVIN_CACHE_URL`, `STRAVIN_RUNTIME_URL`):**
     - Third-party microVM providers can override `STRAVIN_CACHE_URL` and/or `STRAVIN_RUNTIME_URL` at runner boot (e.g., pointing to a co-located regional NVMe cache proxy or sticky-disk cache service on the host hypervisor).
     - `stravin-actions/cache` and `stravin-actions/*-artifact` transparently use the overridden endpoints while preserving Run's cache-key scoping and token validation—letting providers deliver sub-second NVMe cache throughput without asking users to rewrite workflow YAML.
+
+### 6. Regional Runner Placement
+
+- **Default — Repo Home Region:** `stravin-run` schedules jobs on the repository's home-region runner pool by default, delivering zero cross-region S3 egress for Git packfiles, build caches, and artifacts, instant read-after-write consistency on `commit_oid`, and automatic data residency.
+- **Opt-In — Multi-Region / External Pools:** Workflows may target other regions or external pools via `runs-on:` labels or `runner_pool` configuration (for example, GPUs, macOS hosts, customer VPCs, third-party microVM providers, or capacity spillover). Remote runners fetch from the nearest `stravin-edge` read replica (falling back to the repository's home region on replication lag) and use either home-region S3 presigned URLs or a provider-local `STRAVIN_CACHE_URL`.
+- **Residency Guardrail:** Tenants with strict data-residency policies can lock `runner_pool` placement to the repository's home region only, rejecting cross-region pool routing and external endpoint overrides.
 
 ## Alternatives Considered
 
@@ -180,6 +186,7 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 - [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](0002-external-runner-seam-and-oidc-auth.md) — Phase 1 Job-Lease protocol, 6-tuple lease binding, external OIDC App seam, `commit_oid`-pinned `git:read` tokens (`TTL <= 120s`), and `git:bundle:read` gating.
 - [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam (`stravin-auth`)](0003-platform-auth-and-sso-seam.md) — External OIDC App token exchange and Valkey `jti` revocation.
 - [Core ⟷ Run Interface](../interfaces/core-run.md) — Runner checkout protocol, `stravin-edge` pack cache, and `commit_oid`-pinned token minting.
+- [Run Artifacts & Cache Interface](../interfaces/run-artifacts-cache.md) — Dual-mode `STRAVIN_RUNTIME_URL` / `STRAVIN_CACHE_URL` wire API, direct-to-S3 presigned multipart flows, branch/pool cache isolation, and `stravin-actions/*` schemas.
 - [Run ⟷ Gate Interface](../interfaces/run-gate.md) — Speculative merge-queue batch builds, `< 200 ms` cancellation, and partitioned `tree_oid` verdict reuse.
 - [External Webhooks Interface](../interfaces/external-webhooks.md) — Signed outbound `run.job.queued` webhook delivery via `stravin-webhooks`.
 - [Full-Stack Build Waves](../roadmap/full-stack-waves.md) — Wave 3 implementation deliverables for `stravin-run`, `stravin-runner`, and `stravin-actions/*`.

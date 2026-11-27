@@ -64,6 +64,7 @@ Every pair of products either has a direct contract page below or stays intentio
 | 9 | **Platform Events ⟷ External Webhooks** | `stravin-webhooks` subscribing to `stravin.*.>` JetStream streams for outbound machine-to-machine HTTPS delivery, KMS HMAC-SHA256 signing, SSRF isolation, DLQ/replay | Direct HTTP webhooks in Core v1.12.x; Dedicated `stravin-webhooks` service is vNext | [External Webhooks](external-webhooks.md) |
 | 10 | **Platform Products ⟷ Stravin Auth** | `stravin-auth` standalone IAM/STS/RBAC, pluggable `IdentityProvider` + `DirectorySyncAdapter` seams (OIDC, SCIM 2.0, optional WorkOS adapter, future SAML 2.0), local JWKS + Valkey `jti` deny-list, `STRAVIN_AUTH` revocations | Static auth in Core v1.12.x; Dedicated `stravin-auth` service is vNext | [Platform Auth](platform-auth.md) |
 | 11 | **Platform Events ⟷ Stravin Notify** | `stravin-notify` (parallel to `stravin-webhooks`) subscribing to `stravin.*.>` for human notifications: preferences, quiet hours, digests, `stravin-auth` RBAC filtering, `ChannelAdapter` delivery | Proposed Contract (vNext) | [Platform Notify](platform-notify.md) |
+| 12 | **Run ⟷ Runner / Actions (Artifacts & Cache)** | Dual-mode `STRAVIN_RUNTIME_URL` & `STRAVIN_CACHE_URL` wire API (local loopback vs. Geo-Ready Postgres + direct-to-S3 presigned multipart vs. provider NVMe override), strict `ref_scope`/pool cache-poisoning isolation, streaming `tar.zst`, `stravin-actions/*` schemas | Proposed Contract (vNext) | [Run Artifacts & Cache](run-artifacts-cache.md) |
 
 ### Intentionally Decoupled Pairs
 
@@ -74,7 +75,7 @@ Two of the ten possible product pairs have **no direct runtime interface**:
 
 ## Shared Platform Contract Conventions
 
-All eleven interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal workflow boundaries, and evolution policies below.
+All twelve interface specifications reuse the vocabulary, Cilium + app-level security boundaries, NATS JetStream event envelope, Temporal workflow boundaries, and evolution policies below.
 
 ### Canonical Identifiers
 
