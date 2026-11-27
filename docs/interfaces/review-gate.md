@@ -21,20 +21,29 @@ sequenceDiagram
     participant Gate as Stravin Gate (Temporal Workflows)
     participant NATS as NATS JetStream (STRAVIN_GATE / STRAVIN_REVIEW)
 
-    Dev->>Review: Click "Add to Merge Queue" (single PR or stacked group)
-    Review->>Review: Snapshot approvals, unresolved threads, head_oid, stack members
-    Review->>Gate: POST /v1/queues/entries (Idempotency-Key, items[], eligibility, priority)
+    Dev->>Review: Click "Queue Full Stack" (FULL_STACK_ATOMIC) or "Queue #101 / Merge Bottom-Up" (BOTTOM_UP_CASCADE)
+    Review->>Review: Snapshot approvals, unresolved threads, head_oid, stack members (bottom-to-top)
+    Review->>Gate: POST /v1/queues/entries (Idempotency-Key, merge_mode, stack_group_id, items[], eligibility)
     Gate->>Gate: Validate policy_version rules (approvals, draft=false, stack contiguous)
     alt Eligible
-        Gate-->>Review: 201 Created (queue_entry_id, position, policy_version)
+        Gate-->>Review: 201 Created (queue_entry_id, merge_mode, stack_group_id, position, policy_version)
         loop Queue progress
             Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.queue.updated (Nats-Msg-Id, traceparent)
             NATS-->>Review: Durable consumer delivery (review-gate-events)
             Review->>Review: Render queue badge & timeline event on PR(s)
         end
-        Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.entry.merged (merged_commit_oid)
-        NATS-->>Review: Durable consumer delivery
-        Review->>Review: Mark PR(s) merged & close branches
+        alt merge_mode == FULL_STACK_ATOMIC
+            Gate->>Gate: Validate combined tip once (reuse tree_oid verdicts) & AtomicRefCAS entire stack
+            Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.entry.merged (merged_commit_oid, merged_pr_ids[])
+            NATS-->>Review: Durable consumer delivery
+            Review->>Review: Mark all PRs in stack_group_id Merged & clean up intermediate branches
+        else merge_mode == BOTTOM_UP_CASCADE
+            Gate->>Gate: Fast-forward land bottom PR (#101 -> main) when linear
+            Gate->>NATS: Publish stravin.gate.<tenant>.<repo>.entry.merged (merged_commit_oid, fast_forward=true)
+            NATS-->>Review: Durable consumer delivery
+            Review->>Review: Mark #101 Merged, retarget #102 base_ref (feat/auth -> main) & restack cleanly
+            Review->>NATS: Publish stravin.review.<tenant>.<repo>.pr.base_retargeted (pr_id=#102, new_base_ref=main)
+        end
     else Ineligible
         Gate-->>Review: 422 Unprocessable Entity (unmet_requirements[])
         Review-->>Dev: Show blocking policy reasons inline
@@ -66,15 +75,19 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
   "target_ref": "refs/heads/main",
   "actor_id": "usr_alice",
   "priority": "normal",
-  "merge_strategy": "squash",
+  "merge_strategy": "fast_forward",
+  "merge_mode": "FULL_STACK_ATOMIC",
+  "stack_group_id": "stk_01JDF700000000000000000101",
   "atomic_group": true,
   "items": [
     {
       "pr_id": "pr_01JDF7A...",
-      "head_ref": "refs/heads/feat/stack-1",
+      "pr_number": 101,
+      "base_ref": "refs/heads/main",
+      "head_ref": "refs/heads/feat/auth",
       "head_oid": "9999999999999999999999999999999999999999",
       "tree_oid": "8888888888888888888888888888888888888888",
-      "commit_message": "feat(edge): add singleflight pack cache (#410)",
+      "commit_message": "feat(auth): add token verifier (#101)",
       "eligibility": {
         "is_draft": false,
         "unresolved_thread_count": 0,
@@ -87,10 +100,12 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
     },
     {
       "pr_id": "pr_01JDF8Z...",
-      "head_ref": "refs/heads/feat/stack-2",
+      "pr_number": 102,
+      "base_ref": "refs/heads/feat/auth",
+      "head_ref": "refs/heads/feat/auth-ui",
       "head_oid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
       "tree_oid": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
-      "commit_message": "feat(edge): add S3 spillover tier (#411)",
+      "commit_message": "feat(auth-ui): add passkey sign-in flow (#102)",
       "eligibility": {
         "is_draft": false,
         "unresolved_thread_count": 0,
@@ -110,12 +125,21 @@ Response (`201 Created`):
 ```json
 {
   "queue_entry_id": "qe_01JDF9C4D5E6F7G8H9J0K1L2M3",
+  "merge_mode": "FULL_STACK_ATOMIC",
+  "stack_group_id": "stk_01JDF700000000000000000101",
   "state": "queued",
   "position": 3,
   "policy_version": "pol_01JDE0...",
   "enqueued_at": "2026-11-24T22:20:01Z"
 }
 ```
+
+#### Stacked PR Merge Modes (`merge_mode`)
+
+| `merge_mode` | `items[]` Payload | Gate Validation & Merge Semantics | Post-Merge Review Action |
+| :--- | :--- | :--- | :--- |
+| **`FULL_STACK_ATOMIC`** | Ordered bottom-to-top chain (`[#101, #102, #103]`) tagged with a shared `stack_group_id` and `atomic_group: true` | Gate validates the **combined tip once** (reusing cached `tree_oid` verdicts from Stravin Run where applicable) and lands the entire stack atomically onto `target_ref` via Core `AtomicRefCAS` — never landing a half-merged stack. | Review marks every PR in `stack_group_id` as **Merged** and deletes intermediate branches (`feat/auth`, `feat/auth-ui`, `feat/auth-tests`). |
+| **`BOTTOM_UP_CASCADE`** | Single bottom-most unmerged PR (`[#101]` whose `base_ref == target_ref`, e.g., `refs/heads/main`) | Gate verifies linear fast-forward eligibility against `target_ref` (falling back to configured merge strategy only if non-linear and allowed by policy) and lands `#101` onto `main` via fast-forward `AtomicRefCAS`. | Review marks `#101` as **Merged**, **automatically retargets** `#102`'s `base_ref` from `feat/auth` to `main`, fast-forwards/restacks downstream refs cleanly, and publishes `review.pr.base_retargeted`. |
 
 Additional synchronous endpoints:
 
@@ -154,16 +178,19 @@ Published to stream `STRAVIN_GATE` with `Nats-Msg-Id: <idempotency_key>` and W3C
 }
 ```
 
-- `stravin.gate.<tenant_id>.<repo_id>.entry.merged` (`event_type: "gate.entry.merged"`) — Fired after Core `AtomicRefCAS` succeeds, carrying `merged_commit_oid`, `target_ref`, `policy_version`, and per-PR final commit OIDs for stacked groups.
+- `stravin.gate.<tenant_id>.<repo_id>.entry.merged` (`event_type: "gate.entry.merged"`) — Fired after Core `AtomicRefCAS` succeeds, carrying `merge_mode`, `stack_group_id` (when stacked), `merged_commit_oid`, `fast_forward` (`bool`), `target_ref`, `policy_version`, and per-PR final commit OIDs for stacked groups.
 
-### 5.2 Review -> Gate: Eligibility Invalidation Events (`STRAVIN_REVIEW` JetStream)
+### 5.2 Review -> Gate: Eligibility Invalidation & Cascade Events (`STRAVIN_REVIEW` JetStream)
 
-- `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (`event_type: "review.pr.eligibility_changed"`) — Published to `STRAVIN_REVIEW` whenever a queued PR is force-pushed, converted to draft, closed, receives a "changes requested" review, or loses a required approval (and `stravin.review.<tenant_id>.<repo_id>.pr.approved` on approvals). Gate binds durable consumer `gate-review-eligibility` and evicts the affected `queue_entry_id` (and the entire `atomic_group` if stacked).
-- **Temporal Workflow Engine (Gate Only):** **Stravin Gate** runs its speculative merge-queue batch workflows on **Temporal**: `POST /v1/queues/entries` and `DELETE /v1/queues/entries/{queue_entry_id}` start or signal queue workflows idempotently, `STRAVIN_REVIEW` invalidation events deliver external workflow signals, and `GET /v1/prs/{pr_id}/eligibility` runs as an idempotent Temporal activity. **Stravin Review** remains permanently Temporal-free.
+- `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (`event_type: "review.pr.eligibility_changed"`) — Published to `STRAVIN_REVIEW` whenever a queued PR is force-pushed, converted to draft, closed, receives a "changes requested" review, or loses a required approval (and `stravin.review.<tenant_id>.<repo_id>.pr.approved` on approvals). Gate binds durable consumer `gate-review-eligibility` and evicts the affected `queue_entry_id` (and the entire `stack_group_id` if queued under `FULL_STACK_ATOMIC`).
+- `stravin.review.<tenant_id>.<repo_id>.pr.base_retargeted` (`event_type: "review.pr.base_retargeted"`) — Published to `STRAVIN_REVIEW` after a `BOTTOM_UP_CASCADE` merge lands a parent PR (`#101 -> main`) and Review automatically retargets the child PR (`#102`) from `refs/heads/feat/auth` to `refs/heads/main`. Carries `pr_id`, `stack_group_id`, `previous_base_ref`, `new_base_ref`, `parent_merged_commit_oid`, and `fast_forward_clean` (`bool`) so Gate and Run can immediately re-evaluate eligibility and reuse `tree_oid` verdicts without manual user intervention.
+- **Temporal Workflow Engine (Gate Only):** **Stravin Gate** runs its speculative merge-queue batch workflows on **Temporal**: `POST /v1/queues/entries` and `DELETE /v1/queues/entries/{queue_entry_id}` start or signal queue workflows idempotently, `STRAVIN_REVIEW` invalidation and cascade events deliver external workflow signals, and `GET /v1/prs/{pr_id}/eligibility` runs as an idempotent Temporal activity. **Stravin Review** remains permanently Temporal-free.
 
 ## 6. Shared Data Contracts & Identifiers
 
-- **Atomic Stacked Groups:** `items[]` is ordered bottom-to-top (index `0` is closest to `target_ref`). When `atomic_group: true`, Gate either merges every PR in `items[]` in one atomic Ref-CAS sequence or evicts the entire group — never landing a half-merged stack.
+- **Merge Mode Enum (`merge_mode`):**
+    - `FULL_STACK_ATOMIC` — Top-down atomic group merge: `items[]` is ordered bottom-to-top (index `0` is closest to `target_ref`) under one `stack_group_id`. Gate validates the combined tip once (reusing `tree_oid` verdicts where applicable) and either merges every PR in `items[]` atomically or evicts the entire group — never landing a half-merged stack.
+    - `BOTTOM_UP_CASCADE` — Incremental bottom-up merge: lands the bottom PR (`items[0]`) via fast-forward when linear, then Review automatically retargets the immediate child PR's `base_ref` to `target_ref` and emits `review.pr.base_retargeted` so the rest of the stack cascades cleanly without manual retargeting.
 - **Priority Enum:** `low` | `normal` | `high` | `emergency` (skip-to-front, audited).
 - **Eviction Reason Codes:** `MERGE_CONFLICT`, `REQUIRED_CHECK_FAILED`, `APPROVAL_REVOKED`, `HEAD_OID_CHANGED`, `POLICY_CHANGED`, `QUEUE_TIMEOUT`, `USER_DEQUEUED`.
 
@@ -180,16 +207,16 @@ Published to stream `STRAVIN_GATE` with `Nats-Msg-Id: <idempotency_key>` and W3C
 
 ### Side A: Stravin Review Build Checklist
 
-- [ ] Build deterministic eligibility snapshot builder bound to `(pr_id, head_oid, evaluated_at)` and bottom-to-top stack ordering.
-- [ ] Publish `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` (with `Nats-Msg-Id` and `traceparent`) to `STRAVIN_REVIEW` whenever a queued PR's approvals, draft status, or `head_oid` changes.
+- [ ] Build deterministic eligibility snapshot builder bound to `(pr_id, head_oid, evaluated_at)` and bottom-to-top stack ordering with `merge_mode` (`FULL_STACK_ATOMIC` | `BOTTOM_UP_CASCADE`) and `stack_group_id`.
+- [ ] Publish `stravin.review.<tenant_id>.<repo_id>.pr.eligibility_changed` and `stravin.review.<tenant_id>.<repo_id>.pr.base_retargeted` (with `Nats-Msg-Id` and `traceparent`) to `STRAVIN_REVIEW`.
 - [ ] Expose `GET /v1/prs/{pr_id}/eligibility` with app-level `tenant_id` check for Gate's pre-merge freshness check.
-- [ ] Bind durable JetStream consumer `review-gate-events` on `STRAVIN_GATE` and render `queue.updated`, `entry.evicted`, and `entry.merged` on all PRs in an atomic group.
+- [ ] Bind durable JetStream consumer `review-gate-events` on `STRAVIN_GATE`, close all PRs + clean intermediate branches on `FULL_STACK_ATOMIC`, and auto-retarget child PR `base_ref` on `BOTTOM_UP_CASCADE`.
 
 ### Side B: Stravin Gate Build Checklist
 
 - [ ] Implement idempotent `POST /v1/queues/entries`, `DELETE /v1/queues/entries/{id}`, `GET /v1/queues/entries/{id}`, and `POST /v1/policies/evaluate` (backed by Temporal merge-queue workflows and signals) with constant-time `tenant_id` checks.
-- [ ] Enforce `atomic_group: true` all-or-nothing semantics for stacked PRs.
-- [ ] Bind durable JetStream consumer `gate-review-eligibility` on `STRAVIN_REVIEW` and re-verify eligibility snapshots older than 5 minutes before executing Core `AtomicRefCAS`.
+- [ ] Enforce `merge_mode: "FULL_STACK_ATOMIC"` (combined tip validation with `tree_oid` reuse + all-or-nothing atomic merge) and `merge_mode: "BOTTOM_UP_CASCADE"` (fast-forward merge of bottom PR when linear).
+- [ ] Bind durable JetStream consumer `gate-review-eligibility` on `STRAVIN_REVIEW` (handling both `pr.eligibility_changed` and `pr.base_retargeted`) and re-verify eligibility snapshots older than 5 minutes before executing Core `AtomicRefCAS`.
 - [ ] Publish queue outcomes to `STRAVIN_GATE` and return structured `unmet_requirements[]` and `reason_code` values for clear PR timeline feedback.
 
 ### Shared Contract-Test Fixtures

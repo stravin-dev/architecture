@@ -38,6 +38,15 @@ flowchart LR
     Trigger --> DAG --> Lease --> Stream --> Verdict
 ```
 
+## Responsive Behavior
+
+| Breakpoint | Layout & Rail Adaptation | DAG & Live Log Viewport |
+| :--- | :--- | :--- |
+| **Wide Desktop (`>= 1440px`)** | `100%` fluid width (`padding-inline: 24px`); `240px` left workflow + runner pool rail | Full horizontal Temporal DAG without scrolling; wide `JetBrains Mono` log lines with inline search |
+| **Desktop (`1024px - 1439px`)** | `100%` fluid width (`padding-inline: 20px`); compact `220px` left workflow rail | Full horizontal DAG with tighter node spacing; full-width collapsible step log viewer |
+| **Tablet (`768px - 1023px`)** | `100%` fluid width (`padding-inline: 16px`); left workflow rail becomes a toggleable slide-over drawer | DAG scrolls horizontally inside its bounded card; run controls (`Cancel run`, `Re-run failed`) stay pinned in header |
+| **Mobile (`< 768px`)** | Single-column `100%` width (`padding-inline: 12px`); scrollable repo tab bar; workflow selector chip | DAG switches to a compact vertical stage list; wrapped/scrollable log pane with sticky bottom `Re-run` / `Cancel` bar |
+
 ## Product Interface Grounding
 
 - **Core ⟷ Run:** Ephemeral runners fetch via Core's Valkey + S3 pack cache and `bundle-uri` with short-lived scoped Git tokens ([Core ⟷ Run](../interfaces/core-run.md)).

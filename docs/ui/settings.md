@@ -39,6 +39,15 @@ flowchart LR
     Protect --> Gate --> Auth --> Hooks --> Notify
 ```
 
+## Responsive Behavior
+
+| Breakpoint | Layout & Rail Adaptation | Forms, Cards & Tables |
+| :--- | :--- | :--- |
+| **Wide Desktop (`>= 1440px`)** | `100%` fluid width (`padding-inline: 24px`); `240px` left settings rail + breathing full-width card grid | Multi-column SSO adapter tiles (OIDC / SCIM 2.0 / WorkOS) and wide webhook delivery tables |
+| **Desktop (`1024px - 1439px`)** | `100%` fluid width (`padding-inline: 20px`); compact `220px` left settings rail | Multi-column adapter tiles stay side-by-side; toggle rows align cleanly with right-justified switches |
+| **Tablet (`768px - 1023px`)** | `100%` fluid width (`padding-inline: 16px`); left settings rail collapses into a toggleable section drawer | 2-column SSO tiles; webhook rows wrap secondary metadata under the endpoint URL |
+| **Mobile (`< 768px`)** | Single-column `100%` width (`padding-inline: 12px`); top section selector chip; stacked cards | Single-column form cards; one-tap `Redeliver` and switches; sticky bottom `Save Changes` bar when dirty |
+
 ## Product Interface Grounding
 
 - **Core ⟷ Gate:** Synchronizes branch protection rules into Tier 1 Wasm hooks and manages speculative Gate refs ([Core ⟷ Gate](../interfaces/core-gate.md)).
