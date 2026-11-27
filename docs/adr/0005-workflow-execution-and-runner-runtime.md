@@ -27,7 +27,7 @@ We adopt **Option B: Compatible Declarative YAML + OCI/Wasm-First Hybrid Action 
 flowchart TB
     subgraph ControlPlane["Stravin Control Plane (Cilium eBPF SPIFFE mTLS)"]
         direction TB
-        Temporal["Stravin Run (Temporal DAG)\nParse .stravin/workflows/*.yml\nMatrix Fan-Out, <200ms Cancel, tree_oid Reuse"]
+        Temporal["Stravin Run (Temporal DAG)\nCompile to Workflow IR (YAML v1)\nMatrix Fan-Out, <200ms Cancel, tree_oid Reuse"]
         Auth["stravin-auth (External OIDC App Seam)\nSingle-Use JIT Runner Registration Token\n(6-Tuple Job-Lease Bound, Zero Static Secrets)"]
         Core["Stravin Core (stravin-edge)\ncommit_oid-Pinned git:read (TTL <= 120s)\nValkey+S3 Pack Cache & Opt-In bundle-uri"]
         Webhooks["stravin-webhooks\nOutbound run.job.queued Event\n(Labels + Pool Only, Zero Git Tokens)"]
@@ -75,6 +75,14 @@ Workflows are authored as declarative YAML files under **`.stravin/workflows/*.y
         - `STRAVIN_PATH` — Directory entries prepended to `PATH` for subsequent steps.
         - `STRAVIN_STATE` — Private state shared between a step's `pre`, `main`, and `post` hooks.
     - Legacy stdout magic-string directives are **not supported**, removing log-injection command-smuggling vectors.
+
+#### Canonical Workflow IR & Pluggable Frontend Seam
+
+`stravin-run`'s Temporal DAG engine and `stravin-runner` execute **only a canonical Protobuf Workflow IR** (`WorkflowSpec`, `JobSpec`, `StepSpec`), decoupled from authoring syntax:
+
+- **v1 Default Frontend:** Declarative YAML (`.stravin/workflows/*.yml`, `*.yaml`) sits behind a strict `WorkflowCompiler` interface (`Compile -> WorkflowIR`), recommending YAML literal blocks (`run: |`) or `.stravin/scripts/*.sh` for multi-line shell logic.
+- **Pluggable Future Frontends (CUE / Starlark / Pkl):** Additional deterministic, sandboxed frontends (`.cue`, `.star`, `.pkl`) with raw multiline strings (`#"""..."""#` / `r"""..."""`), native typing, and IDE formatting/linting can compile into the exact same Workflow IR with zero changes to Temporal orchestration, `stravin-runner`, `stravin-actions/*`, or `stravin-gate`.
+- **Server-Side Compilation Guardrails:** All frontends execute hermetic, non-I/O evaluation with strict CPU, memory, and timeout limits before emitting the validated Workflow IR—enforcing the exact same untrusted-context shell-injection and SHA/digest pinning policies on the compiled IR.
 
 ### 2. Action Execution Runtimes (Composite + OCI + Optional Wasm)
 
@@ -177,7 +185,7 @@ Stravin Run is designed from Day 1 so specialized third-party microVM runner pro
 ## Undo / Rollback Path
 
 - **Adding or retiring action runtime tiers:** Because `stravin-runner` dispatches steps behind a `StepRuntime` interface (`composite`, `oci`, `wasm`), adding a new runtime tier or retiring optional Wasm support requires no change to Temporal DAG orchestration, Core Git tokens, or Gate verdict contracts.
-- **Extending workflow syntax:** `.stravin/workflows/*.yml` carries an explicit schema version; additive YAML fields follow `N / N-1` compatibility without breaking existing pipelines or third-party `stravin-runner` binaries.
+- **Extending workflow syntax and frontends:** `.stravin/workflows/*.yml` carries an explicit schema version with `N / N-1` additive compatibility, and the `WorkflowCompiler` seam isolates authoring formats from the canonical Protobuf Workflow IR—so adding, deprecating, or disabling alternative frontends (CUE, Starlark, Pkl) requires zero changes to Temporal orchestration, third-party `stravin-runner` binaries, `stravin-actions/*`, or `stravin-gate`.
 - **Disabling endpoint overrides per tenant:** Overriding `STRAVIN_CACHE_URL` and `STRAVIN_RUNTIME_URL` is controlled by runner-pool policy in `stravin-run`, allowing tenants with strict data-residency requirements to pin all cache and artifact traffic to Stravin-managed S3 endpoints.
 
 ## Related Documents
