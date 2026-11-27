@@ -3,6 +3,7 @@ site_name = "Stravin Architecture"
 site_description = "System architecture, design specs, RFCs, and ADRs for the Stravin platform."
 docs_dir = "docs"
 extra_css = ["assets/stylesheets/extra.css"]
+extra_javascript = ["assets/javascripts/diagram-panzoom.js"]
 
 nav = [
   { "Overview" = "index.md" },
