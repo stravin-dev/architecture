@@ -38,9 +38,9 @@ flowchart LR
 
     subgraph W2["Wave 2: First Runnable Full-Stack UI (stravin-dev/platform)"]
         W2Boot["Platform Monorepo Bootstrap\n(buf protos, Go + pnpm, Postgres, Compose)"]
-        W2Auth["stravin-auth\n(Passkeys/Argon2id, SSH, PAT, JWKS, RBAC)"]
-        W2Review["stravin-review\n(PRs, Inline Comments, Stacked PRs)"]
-        W2Web["stravin-web BFF + React 19 UI\n(Tailwind, @pierre/diffs, PR & Settings)"]
+        W2Auth["stravin-auth\n(Passkeys/Argon2id, SSH & GPG Keys, PAT, JWKS, RBAC)"]
+        W2Review["stravin-review\n(PRs, Inline Comments, Stacked PRs, GPG/SSH Sig Verify)"]
+        W2Web["stravin-web BFF + React 19 UI\n(Tailwind, @pierre/diffs, PRs/Verified Badges & Settings)"]
     end
 
     subgraph W3["Wave 3: Actions, Merge Queue & Temporal (stravin-dev/platform)"]
@@ -54,7 +54,7 @@ flowchart LR
         W4Hooks["stravin-webhooks\n(Per-Endpoint Queues, KMS HMAC, SSRF, DLQ)"]
         W4Notify["stravin-notify\n(Prefs, RBAC Filter, WS Popups, Email/Slack)"]
         W4Index["stravin-index\n(Incremental Indexing, PR Symbol Hover)"]
-        W4SSO["stravin-auth SSO & DirectorySync\n(OIDC, SCIM 2.0, Optional WorkOS)"]
+        W4SSO["stravin-auth SSO & DirectorySync\n(Google & External OIDC, SCIM 2.0, Optional WorkOS)"]
         W4Img["Phase 2 ImageDiffRenderer\n(2-up, Swipe, Onion-Skin, Pixel Diff)"]
     end
 
@@ -95,19 +95,19 @@ flowchart LR
 
 ### Deliverables
 
-1. **Evolve `stravin-hook` → `stravin-relay`:**
+1. **Evolve `stravin-hook` → `stravin-relay` ([stravin-dev/core#188](https://github.com/stravin-dev/core/issues/188)):**
     - Rename/evolve the DynamoDB Streams consumer into `stravin-relay` per [ADR-0001](../adr/0001-platform-transport-events-webhooks.md).
     - Publish Standard Async Event Envelopes (`stravin.core.*.*.ref.updated`, `repo.created`, `repo.deleted`) to the `STRAVIN_CORE` NATS JetStream stream.
     - Propagate deterministic `Nats-Msg-Id` deduplication keys and W3C `traceparent` headers on every published message.
-2. **Core Read-Only Git Data / Diff gRPC API:**
+2. **Core Read-Only Git Data / Diff gRPC API ([stravin-dev/core#189](https://github.com/stravin-dev/core/issues/189)):**
     - Implement the `GitData` gRPC service defined in [Core ⟷ Review](../interfaces/core-review.md):
         - `GetDiff` returning `DiffFileEntry` descriptors (`path`, `old_path`, `change_kind`, `mime_type`, `is_binary`, `old_blob_oid`, `new_blob_oid`, `old_size_bytes`, `new_size_bytes`, and text `hunks`).
         - `GetBlob` for streaming raw blob bytes by OID (powering `stravin-web`'s sandboxed blob proxy).
         - `ListTree` for repository tree browsing and file-tree navigation.
-3. **Local JWKS + Valkey `jti` Verification in `stravin-edge`:**
+3. **Local JWKS + Valkey `jti` Verification in `stravin-edge` ([stravin-dev/core#190](https://github.com/stravin-dev/core/issues/190)):**
     - Add local JWKS signature verification and Valkey `jti` deny-list checks in `stravin-edge` per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md) so `stravin-auth` is never on the Git push/fetch hot path.
     - Retain `StaticAuthenticator` as an explicit fallback for standalone Core development and `stravin-loadgen`.
-4. **Local JetStream Container:**
+4. **Local JetStream Container ([stravin-dev/core#187](https://github.com/stravin-dev/core/issues/187)):**
     - Add a single `nats -js` container to `stravin-dev/core`'s `docker-compose.yml` with stream bootstrap seeding and Prometheus metrics export.
 
 ### Wave 1 Exit Criteria
@@ -132,13 +132,15 @@ flowchart LR
     - **Database migrations:** Per-service PostgreSQL schemas (`auth`, `review`) strictly enforcing the Geo-Ready Schema Guardrails (`(tenant_id, id)` composite PKs, ULID/UUIDv7, leading `tenant_id` indexes, zero Postgres-only extensions).
     - **Unified Local Docker Compose:** Single `make up` linking `stravin-dev/core` containers with Postgres, `stravin-auth`, `stravin-review`, and `stravin-web`.
 2. **Standalone `stravin-auth`:**
-    - Local passkeys (WebAuthn) and Argon2id password login, SSH public key management, Personal Access Tokens (PATs), JWKS keypair rotation, Valkey `jti` revocation writes, `STRAVIN_AUTH` revocation events, and coarse RBAC (`owner`, `maintainer`, `write`, `read`) per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md).
+    - Local passkeys (WebAuthn) and Argon2id password login, SSH and GPG public key management, Personal Access Tokens (PATs), JWKS keypair rotation, Valkey `jti` revocation writes, `STRAVIN_AUTH` revocation events, and coarse RBAC (`owner`, `maintainer`, `write`, `read`) per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md).
+    - Exposes user GPG and SSH signing public keys for commit signature verification.
 3. **`stravin-review`:**
     - Pull Request lifecycle, inline line/file comment threads, review states, and **Stacked PRs** (`FULL_STACK_ATOMIC` and `BOTTOM_UP_CASCADE` merge modes with automatic branch-on-branch base resolution).
+    - GPG and SSH commit signature verification against registered user public keys in `stravin-auth`, surfacing verification status (`Verified` badge) on commits and PRs.
     - Consumes `STRAVIN_CORE` ref updates and publishes `STRAVIN_REVIEW` JetStream events.
 4. **`stravin-web` (Go BFF) + React 19 UI:**
     - **Go BFF:** `HttpOnly`, `Secure`, `SameSite=Lax` cookie session termination, CSRF enforcement, ConnectRPC proxy/aggregator with mandatory `tenant_id` propagation, authenticated blob proxy (`/api/v1/repos/{tenant}/{repo}/blobs/{oid}`), strict CSP/security headers, and thin Go OpenGraph/SEO meta injection per [ADR-0004](../adr/0004-frontend-stack-spa-go-bff.md).
-    - **React 19 Frontend:** Full-width responsive shell (`<768px`, `768–1023px`, `1024–1439px`, `≥1440px`), PR List, PR Detail with Stacked PR Navigation Strip, lazy-loaded `CodeDiffRenderer` powered by **`@pierre/diffs`** (Shiki highlighting, virtualized split/unified diffs), inline comment composer, and basic Settings (`SSH Keys`, `PATs`, `Auth`).
+    - **React 19 Frontend:** Full-width responsive shell (`<768px`, `768–1023px`, `1024–1439px`, `≥1440px`), PR List, PR Detail with Stacked PR Navigation Strip and `Verified` commit signature badges, lazy-loaded `CodeDiffRenderer` powered by **`@pierre/diffs`** (Shiki highlighting, virtualized split/unified diffs), inline comment composer, and basic Settings (`SSH Keys`, `GPG Keys`, `PATs`, `Auth`).
 
 ### Wave 2 Exit Criterion
 
@@ -185,7 +187,8 @@ flowchart LR
 3. **`stravin-index` (Code Search & Inline Intelligence):**
     - Incremental indexing driven by `STRAVIN_CORE` JetStream events, trigram full-text search, and low-latency PR diff symbol hover / go-to-definition popovers (`packages/index-client/`) per [Core ⟷ Index](../interfaces/core-index.md) and [Review ⟷ Index](../interfaces/review-index.md).
 4. **Enterprise SSO & Directory Sync (`stravin-auth` Add-Ons):**
-    - Pluggable `IdentityProvider` (native OIDC + optional WorkOS SSO adapter) and `DirectorySyncAdapter` (native SCIM 2.0 + optional WorkOS Directory Sync adapter) per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md).
+    - **Google OIDC** and other external OIDC providers (e.g., Okta, Entra ID), SCIM 2.0, and optional WorkOS stay in Wave 4 rather than expanding Wave 2's standalone local auth surface.
+    - Pluggable `IdentityProvider` (native OIDC including Google OIDC + optional WorkOS SSO adapter) and `DirectorySyncAdapter` (native SCIM 2.0 + optional WorkOS Directory Sync adapter) per [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md).
 5. **Phase 2 `ImageDiffRenderer`:**
     - Register the lazy-loaded `ImageDiffRenderer` chunk inside `packages/review/src/diff/` supporting **`2-up`**, **`Swipe`**, **`Onion-Skin`**, and **`Pixel Diff`** view modes over `stravin-web`'s sandboxed blob proxy.
 
@@ -195,6 +198,21 @@ flowchart LR
 - Mentioning a reviewer delivers an RBAC-checked real-time in-app toast and respects configured notification channels.
 - Hovering a symbol inside a PR diff surfaces type/definition context from `stravin-index`.
 - PRs modifying raster images render in `2-up`, `Swipe`, `Onion-Skin`, and `Pixel Diff` modes without loading image codec bundles on pure-code PRs.
+
+---
+
+## Core ⟷ Platform Development & Cloud Deployment Workflow
+
+To keep daily iteration fast while preserving clean repository boundaries and production-parity network security, `stravin-dev/core` and `stravin-dev/platform` follow three distinct operating modes:
+
+- **Daily Local Development (100% Docker Compose):**
+    - `stravin-dev/platform`'s unified Docker Compose stack links `stravin-dev/core` containers (Floci, Valkey, 5 Core daemons) with PostgreSQL, NATS JetStream, and Temporal on a shared local Docker network.
+    - No Kubernetes or Cilium is required for day-to-day feature work, frontend development, or integration testing.
+- **Local Cilium eBPF Policy Testing (`kind` on OrbStack):**
+    - Because OrbStack's built-in Kubernetes cluster ships with a fixed CNI, local Cilium eBPF mTLS and `CiliumNetworkPolicy` verification runs inside a **`kind` cluster on OrbStack** configured with `disableDefaultCNI: true` and Cilium installed as the CNI.
+- **Cloud Deployment (Independent Charts + Thin Umbrella Chart):**
+    - `stravin-dev/core` and `stravin-dev/platform` build, version, and publish independent OCI container images and Helm charts on their own release cadences.
+    - Production and staging environments pin tested Core and Platform chart versions together through a thin umbrella Helm chart rather than coupling their build or release pipelines.
 
 ---
 

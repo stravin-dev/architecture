@@ -19,8 +19,8 @@ Stravin Settings keeps configuration approachable for both small standalone team
 
 ### Key Elements
 
-- **Identity & SSO (`stravin-auth`):** Reflects Stravin's standalone-first architecture—local passkeys/Argon2id/SSH/PAT auth stays active by default, while the enterprise SSO add-on surfaces three crisp tiles:
-    - **OIDC `IdentityProvider`:** Direct IdP integration (Okta, Entra ID, Google) with JWKS cached off the Git hot path.
+- **Identity & SSO (`stravin-auth`):** Reflects Stravin's standalone-first architecture—local passkeys/Argon2id login, **SSH Keys**, **GPG Keys** (for signed commits), and **PATs** stay active by default, while the Wave 4 enterprise SSO add-on surfaces three crisp tiles:
+    - **OIDC `IdentityProvider`:** Direct IdP integration (Google OIDC, Okta, Entra ID) with JWKS cached off the Git hot path.
     - **SCIM 2.0 `DirectorySyncAdapter`:** Automated user/team provisioning with instant Valkey `jti` revocation.
     - **WorkOS Managed Adapter:** Single optional toggle for organizations wanting managed SAML 2.0 / enterprise directory sync without custom wiring.
 - **External Webhooks (`stravin-webhooks`):** Shows each outbound endpoint with a live health dot, subscribed events, KMS HMAC-SHA256 signing status, last HTTP result, and a one-click **`Redeliver`** button for failed/DLQ deliveries.
