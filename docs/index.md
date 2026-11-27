@@ -40,6 +40,7 @@ Splitting repositories by role keeps open-source engine code, documentation, mar
 | Repository | Purpose | Go Module / Hosting | License |
 | :--- | :--- | :--- | :--- |
 | `stravin-dev/core` | Stateless, multi-region Git storage engine in Go backed by S3 and DynamoDB | `stravin.dev/core` (via `?go-get=1` vanity import tag) | **Apache 2.0** |
+| `stravin-dev/platform` | Unified platform monorepo (`buf` Protobuf/ConnectRPC contracts, `auth`, `review`, `run`, `gate`, `index`, `webhooks`, `notify`, `web`, Geo-Ready Postgres migrations, React 19 UI, and unified local Docker Compose) | `stravin.dev/platform` | **Planned** |
 | `stravin-dev/architecture` | Platform architecture and technical design documentation (this site) | GitHub Pages subdomain of `stravin.dev` | **Apache 2.0** |
 | `stravin-dev/website` | Official apex marketing site (`stravin.dev`), Astro on Cloudflare Workers (also serves `?go-get=1` vanity middleware) | `stravin.dev` | **All Rights Reserved** (or Split License: Apache 2.0 code + All Rights Reserved copy/assets) |
 | `stravin-dev/assets` | Brand identity, SVG marks, color palette, typography, and visual assets | Static brand asset repository | **All Rights Reserved** |
@@ -94,7 +95,11 @@ GitHub-familiar developer ergonomics styled with Stravin's architectural brandin
 - [ADR-0001: Platform Transport, Internal Events, External Webhooks, and Durable Workflows](adr/0001-platform-transport-events-webhooks.md) — Adopts Cilium (eBPF) sidecarless mTLS, NATS JetStream for internal async events, a dedicated `stravin-webhooks` service for outbound customer delivery, and Temporal as the official durable workflow engine for Run and Gate with a four-phase rollout plan.
 - [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](adr/0002-external-runner-seam-and-oidc-auth.md) — Adopts a phased hybrid external runner seam (Phase 1 pull-based Job-Lease under Run's Temporal DAG; Phase 2 degraded-tier BYO-CI via `stravin-webhooks` + `app_id`-bound Checks API), scopes OIDC Apps strictly to external callers, and defines Core/Run/Gate security hardening invariants.
 - [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam (`stravin-auth`)](adr/0003-platform-auth-and-sso-seam.md) — Defines standalone-first `stravin-auth` (passkeys, Argon2id, SSH keys, PATs, OIDC Apps, STS, coarse RBAC), pluggable `IdentityProvider` + `DirectorySyncAdapter` seams (OIDC, SCIM 2.0, optional WorkOS adapter, future SAML 2.0), local JWKS + Valkey `jti` hot-path isolation, and instant revocation propagation.
-- [ADR-0004: Web Frontend Stack — Static TypeScript SPA + Go BFF (`stravin-web`)](adr/0004-frontend-stack-spa-go-bff.md) — Adopts a Vite-built Static TypeScript SPA (modular monorepo with lazy-loaded feature packages, zero Node.js runtime in production) backed by a thin Go BFF (`stravin-web`) owning `HttpOnly`/`Secure`/`SameSite=Lax` cookie auth, Cilium mTLS aggregation with `tenant_id` propagation, WebSocket/SSE stream proxying, strict CSP/security headers, and thin Go OpenGraph/SEO meta injection.
+- [ADR-0004: Web Frontend Stack — Static TypeScript SPA + Go BFF (`stravin-web`)](adr/0004-frontend-stack-spa-go-bff.md) — Adopts a Vite-built Static TypeScript SPA (**React 19 + Tailwind CSS + `@pierre/diffs`** in the **`stravin-dev/platform`** monorepo, zero Node.js runtime in production) backed by a thin Go BFF (`stravin-web`) over **Protobuf + ConnectRPC (`buf`)**, owning `HttpOnly`/`Secure`/`SameSite=Lax` cookie auth, Cilium mTLS aggregation with `tenant_id` propagation, WebSocket/SSE stream proxying, strict CSP/security headers, and thin Go OpenGraph/SEO meta injection.
+
+## Implementation Roadmap
+
+- [Full-Stack Build Waves](roadmap/full-stack-waves.md) — Actionable 4-wave implementation sequence from `stravin-dev/core` `v1.12.1` to the full `stravin-dev/platform` stack and React 19 web UI, locking in the frontend stack (`React 19 + Tailwind CSS + @pierre/diffs`), `stravin-dev/platform` monorepo, Geo-Ready PostgreSQL schema guardrails, and `Protobuf + ConnectRPC (buf)` contracts.
 
 ## Operations & Tooling
 
