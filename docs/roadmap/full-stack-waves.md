@@ -157,8 +157,8 @@ flowchart LR
 1. **Temporal in Local Compose:**
     - Add `temporal server start-dev` (with Web UI) to the unified Docker Compose stack alongside per-service PostgreSQL schemas (`run`, `gate`).
 2. **`stravin-run` (CI / Runners):**
-    - Temporal DAG workflows executing pipeline graphs with `tree_oid` verdict reuse and `<200ms` cancellation propagation on supersede/eviction.
-    - Hosted ephemeral runner pool + **Phase 1 External OIDC Job-Lease Seam** per [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md).
+    - Temporal DAG workflows executing `.stravin/workflows/*.yml` pipeline graphs with `tree_oid` verdict reuse and `<200ms` cancellation propagation on supersede/eviction.
+    - Static Go **`stravin-runner`** (hosted ephemeral pool + `stravin-runner local` Docker parity with embedded loopback `STRAVIN_CACHE_URL` / `STRAVIN_RUNTIME_URL`), OCI/Wasm-first hybrid action execution, first-party **`stravin-actions/*`** repositories (`checkout`, `cache`, `upload-artifact`, `download-artifact`, `setup-*`), and Day-1 **third-party microVM runner hooks** (`run.job.queued` webhook, single-use JIT OIDC registration tokens, overridable cache/artifact endpoints) per [ADR-0002](../adr/0002-external-runner-seam-and-oidc-auth.md) and [ADR-0005](../adr/0005-workflow-execution-and-runner-runtime.md).
     - Real-time ANSI step log streaming and `STRAVIN_RUN` JetStream check/verdict events.
 3. **`stravin-gate` (Merge Queue & Policy):**
     - Temporal merge-queue workflows implementing speculative batches, branch protection enforcement (paired with Core's Tier 1 Wasm pre-receive gate), and stacked PR `FULL_STACK_ATOMIC` + `BOTTOM_UP_CASCADE` execution.
@@ -222,6 +222,7 @@ To keep daily iteration fast while preserving clean repository boundaries and pr
 - [ADR-0002: External Runner Seam, State-Machine Ownership, and OIDC App Authentication](../adr/0002-external-runner-seam-and-oidc-auth.md)
 - [ADR-0003: Platform IAM, Authentication, STS, and Pluggable SSO Seam (`stravin-auth`)](../adr/0003-platform-auth-and-sso-seam.md)
 - [ADR-0004: Web Frontend Stack — Static TypeScript SPA + Go BFF (`stravin-web`)](../adr/0004-frontend-stack-spa-go-bff.md)
+- [ADR-0005: Declarative YAML Workflow Execution, First-Party Action Repositories, and Runner Runtime](../adr/0005-workflow-execution-and-runner-runtime.md)
 - [Product-Stack Interface Overview & Matrix](../interfaces/index.md)
 - [UI Design Overview & Shell](../ui/index.md)
 - [Local Development](../operations/local-dev.md)
