@@ -8,7 +8,7 @@ This specification defines the meet-in-the-middle contract between **Stravin Aut
 
 | Concern | Source of Truth | Private Implementation Details (Never Crosses Boundary) |
 | :--- | :--- | :--- |
-| **Local accounts (passkeys/WebAuthn, Argon2id), SSH keys, PATs, OIDC Apps & installations** | **Stravin Auth** (`stravin-auth`) | Password hashes, WebAuthn challenges, PAT hash table, KMS signing key custody |
+| **Local accounts (passkeys/WebAuthn, Argon2id), SSH & GPG keys, PATs, OIDC Apps & installations** | **Stravin Auth** (`stravin-auth`) | Password hashes, WebAuthn challenges, PAT hash table, KMS signing key custody |
 | **External SSO (`IdentityProvider`: Phase 1 OIDC, Optional WorkOS SSO, Future SAML 2.0) & Directory Sync (`DirectorySyncAdapter`: Native SCIM 2.0, Optional WorkOS Directory Sync)** | **Stravin Auth** (`stravin-auth`) | IdP/broker protocol parsing, PKCE/state stores, WorkOS webhook HMAC verification, SAML XML verification, SSRF-hardened discovery/JWKS client |
 | **Sole STS token minting (service JWTs, user JWTs, `commit_oid`-pinned Git tokens), Valkey `jti` deny-list, coarse org/repo RBAC** | **Stravin Auth** (`stravin-auth`) | Private signing keys, RBAC assignment tables, directory group-to-role rules (WorkOS never mints tokens accepted by downstream products) |
 | **Local JWT verification (`/.well-known/jwks.json`) & sub-ms Valkey `jti` checks** | **Consuming Products** (`stravin-edge`, Review, Run, Index, Gate, Webhooks, Notify) | In-process JWKS cache, per-request token parser, constant-time `tenant_id` middleware |
@@ -125,6 +125,7 @@ Authorization: Bearer <edge-service-jwt>
 ```
 
 - Called by `stravin-edge` **only on Valkey cache miss**; responses are cached in Valkey (`TTL <= 60s`) and eagerly evicted on `principal.revoked` or `ssh_key.revoked` JetStream events.
+- `stravin-auth` also stores users' **GPG** and **SSH signing public keys** for cold-path commit signature verification by `stravin-review` (powering `Verified` badges on commits and PRs), using the same Valkey cache and revocation-eviction pattern.
 
 ### 4.4 Coarse RBAC Check & Batch Visibility Filter — *Proposed Contract (vNext)*
 
@@ -287,7 +288,7 @@ Example `principal.revoked` envelope:
 
 ### Side A: Stravin Auth (`stravin-auth`)
 
-- [ ] Implement standalone auth store (passkeys/WebAuthn, Argon2id, SSH keys, PATs, OIDC Apps, coarse org/repo RBAC) with zero external IdP dependency.
+- [ ] Implement standalone auth store (passkeys/WebAuthn, Argon2id, SSH & GPG keys, PATs, OIDC Apps, coarse org/repo RBAC) with zero external IdP dependency.
 - [ ] Implement `IdentityProvider` seam normalizing external assertions into `(tenant_id, idp_id, external_sub, email, email_verified, groups[])` with Phase 1 Native OIDC (Auth Code + PKCE, safe-dialer JWKS) and optional WorkOS SSO adapter (`workos.com`), keeping `stravin-auth` as sole token issuer.
 - [ ] Implement `DirectorySyncAdapter` seam normalizing native SCIM 2.0 (`/scim/v2/Users`, `/scim/v2/Groups`) and optional WorkOS Directory Sync webhooks (`POST /v1/auth/dsync/workos/webhooks`, HMAC-SHA256 + timestamp replay verification) into `DirectorySyncEvent` (`UpsertUser`, `DeactivateUser`, `SyncGroup`, `RemoveGroupMember`).
 - [ ] Enforce no auto-linking to unverified local emails and constant-time `tenant_id` checks on every route.
