@@ -7,8 +7,8 @@ This specification defines the contract between **Stravin Core** (bare Git stora
 | Concern | Source of Truth | Private Implementation Details (Never Crosses Boundary) |
 | :--- | :--- | :--- |
 | **Git objects, packs, refs, `default_branch`, `object_format`** | **Stravin Core** | S3 pack layout, DynamoDB `RS#s`/`RH#s`/`MS#m` sharding, `stravin-node` NVMe cache, `stravin-pack` compaction |
-| **PR lifecycle, review comments, approvals, stacked-diff topology, draft state** | **Stravin Review** | Review SQL/document database, inline comment anchoring heuristics, UI notification preferences |
-| **PR synthetic/head refs (`refs/stravin/pr/{pr_id}/head`, `refs/stravin/pr/{pr_id}/merge`)** | **Stravin Core** (storage) / **Stravin Review** (lifecycle) | Core stores refs via Ref-CAS; Review decides when to create, update, or clean them up |
+| **PR lifecycle, review comments, approvals, stacked-diff topology (`base_ref` -> parent `head_ref`), draft state** | **Stravin Review** | Review SQL/document database, inline comment anchoring heuristics, UI notification preferences |
+| **PR synthetic/head refs (`refs/stravin/pr/{pr_id}/head`, `refs/stravin/pr/{pr_id}/merge`)** | **Stravin Core** (storage) / **Stravin Review** (lifecycle) | Core stores refs via Ref-CAS; Review decides when to create, update, retarget, or clean them up |
 | **Synchronous push guardrails (Tier 1 Wasm hooks)** | **Stravin Core** (execution) | `wazero` module cache, bulkhead semaphore; Review surfaces hook rejection messages to web-editor commits |
 
 ## 2. Interaction Flow
@@ -110,6 +110,14 @@ message DiffEntry {
 
 When Review submits a commit (e.g., applying a suggested change or resolving a conflict in the UI), Core executes configured Tier 1 `wazero` Wasm hooks (`HookHostABI`). A `REJECT` verdict returns the hook's `message` and per-ref `ref_verdicts` over Git side-band stderr (or structured `FAILED_PRECONDITION` details on `CreateCommitAndUpdateRef`) so Review can render the exact guardrail violation inline.
 
+### 4.4 Stacked PR Branch Resolution, Base Retargeting & Fast-Forward Ref Advancement — *Proposed Contract (vNext)*
+
+Stravin supports first-class branch-on-branch stacked pull requests without hidden metadata refs or custom Git wire extensions:
+
+- **Branch-on-Branch Stack Resolution:** When a PR's `base_ref` equals another open PR's `head_ref` (for example `PR #101 (feat/auth -> main)` <- `PR #102 (feat/auth-ui -> feat/auth)` <- `PR #103 (feat/auth-tests -> feat/auth-ui)`), **Stravin Review** resolves the contiguous directed chain in its PR graph and computes each PR's incremental diff via `GitData.CompareDiff(base_oid=parent_head_oid, head_oid=child_head_oid, three_dot=true)`. Review rejects cyclic `base_ref` chains before persisting.
+- **Automatic Base-Branch Retargeting (Bottom-Up Merge):** When the bottom PR (`#101`) lands on `main` via `BOTTOM_UP_CASCADE`, Core emits `core.ref.updated` for `refs/heads/main` (and optional deletion of `refs/heads/feat/auth`). Review atomically updates `#102`'s `base_ref` from `refs/heads/feat/auth` to `refs/heads/main`, re-evaluates `GitData.MergeBase(main_oid, pr102_head_oid)` and `GitData.CompareDiff`, and emits `review.pr.base_retargeted` (`STRAVIN_REVIEW`) without requiring manual retargeting by the author.
+- **Fast-Forward Ref Advancement:** For linear stacks and bottom-up merges, ref updates advance via fast-forward (`old_oid` is an ancestor of `new_oid` verified through `GitData.MergeBase` / `CreateCommitAndUpdateRef` with `fast_forward_only: true` and atomic DynamoDB `Ref-CAS`). Because fast-forward preserves exact commit and `tree_oid` identities, downstream PRs in the stack remain cleanly descendant of the new `main` tip with zero synthetic merge commits and maximum `tree_oid` CI verdict reuse.
+
 ## 5. Asynchronous Events & Streams
 
 ### 5.1 Core -> Review: Ref Update Event (`STRAVIN_CORE` JetStream)
@@ -147,6 +155,7 @@ When Review submits a commit (e.g., applying a suggested change or resolving a c
 
 - **Repository Identity:** `(tenant_id, repo_id)` + immutable `object_format` (`sha1` | `sha256`) and mutable `default_branch` (from Core `META`).
 - **PR Reference Namespace:** Review-managed refs live strictly under `refs/stravin/pr/{pr_id}/head` and `refs/stravin/pr/{pr_id}/merge` so they never collide with user branches (`refs/heads/*`) or Gate refs (`refs/stravin/gate/*`).
+- **Stacked Lineage:** Stored in Review as `(pr_id, base_ref, head_ref, stack_group_id)` resolved directly from user branch refs (`refs/heads/*`); Core remains unaware of PR groupings and enforces only atomic ref-CAS and fast-forward ancestry checks.
 - **OID Encoding:** Always lowercase hex matching `object_format` (40 chars for `sha1`, 64 chars for `sha256`). Zero OID (`ddb.ZeroOIDForFormat`) represents ref creation (`old_oid`) or deletion (`new_oid`).
 
 ## 7. Failure Modes, Timeouts & Idempotency
@@ -171,7 +180,7 @@ When Review submits a commit (e.g., applying a suggested change or resolving a c
 
 - [ ] Bind durable JetStream consumer `review-core-refs` on `STRAVIN_CORE` (`stravin.core.*.*.ref.updated`), verifying envelope `tenant_id` matches subject `tenant_id`.
 - [ ] Store `(tenant_id, repo_id, object_format)` on every PR; never hardcode 40-char SHA-1 assumptions.
-- [ ] Implement idempotent PR revision sync keyed by `(ref_name, ulid)` plus on-demand `ListRefs` reconciliation on PR view.
+- [ ] Implement idempotent PR revision sync keyed by `(ref_name, ulid)`, branch-on-branch stack resolution (`base_ref` matching parent `head_ref`), and automatic `base_ref` retargeting on bottom-up fast-forward merges.
 - [ ] Restrict all Review-managed refs to `refs/stravin/pr/{pr_id}/*`.
 
 ### Shared Contract-Test Fixtures

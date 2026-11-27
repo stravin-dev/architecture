@@ -33,6 +33,26 @@ Every UI surface uses the canonical tokens defined in `stravin-dev/assets/BRANDI
 
 Typography uses **`Inter`** for all UI chrome and prose, and **`JetBrains Mono`** for branch refs, commit SHAs, code diffs, step logs, and filter queries.
 
+## Full-Width Layout & Responsive Breakpoints
+
+The Stravin web application shell is **full width (`width: 100%`)** with zero cramped, fixed-width centered containers. Wide monitors give diffs, Temporal DAGs, and settings tables the entire horizontal canvas, while tablets and phones collapse secondary rails into drawers and sticky action bars with zero horizontal page scroll.
+
+![Stravin Responsive Breakpoints composite mockup](assets/responsive-breakpoints.png)
+
+| Breakpoint | Viewport Width | Container & Padding | Rails & Navigation | Diffs, DAGs & Primary Actions |
+| :--- | :--- | :--- | :--- | :--- |
+| **Wide Desktop** | `>= 1440px` | `100%` fluid (`padding-inline: 24px`) | Fluid main pane + fixed `300px` right metadata rail (`Review` / `Gate`); `240px` left workflow/settings rail | Side-by-side diffs expand to fill all available width; `Actions` DAG and `Settings` forms breathe cleanly |
+| **Desktop** | `1024px - 1439px` | `100%` fluid (`padding-inline: 20px`) | Compact `260px` right rail; `220px` left workflow/settings rail | Side-by-side diffs stay enabled with compact line-number gutters; DAG nodes stay horizontal |
+| **Tablet** | `768px - 1023px` | `100%` fluid (`padding-inline: 16px`) | Right metadata rail collapses into a compact top summary strip + slide-over drawer; left rails become toggleable drawers | Diffs default to **unified** view; horizontal DAG scrolls inside its card container |
+| **Mobile** | `< 768px` | Single-column `100%` (`padding-inline: 12px`) | Horizontally scrollable repo tab bar; stacked cards; rails open as full-height bottom/side sheets | Unified diff only; **sticky bottom action bar** (`Approve` / `Queue`) with zero horizontal page scroll |
+
+### Rail & Diff Collapse Rules
+
+- **Right Metadata Rail (`Review` / `Gate`):** Fixed `300px` at `>= 1440px` and `260px` at `1024px - 1439px`; below `1024px` it collapses into a one-line summary strip (approvals, Gate badge, checks) with an expand drawer button.
+- **Left Navigation Rail (`Actions` / `Settings`):** Persistent at `>= 1024px`; below `1024px` it converts to a top filter/section selector chip that opens a slide-over drawer.
+- **Diff Viewport (`Files Changed`):** Defaults to side-by-side at `>= 1024px` and switches automatically to unified at `< 1024px` (user toggleable on Tablet, locked unified on Mobile).
+- **Sticky Mobile Action Bar:** Below `768px`, primary review and merge actions (`Approve`, `Queue Full Stack` / `Queue #101`) pin to a 56px bottom bar so engineers can act without scrolling back to the Merge Box.
+
 ## GitHub ⟷ Stravin UX Mapping
 
 | Workflow Area | Kept Familiar from GitHub | Simplified or Upgraded in Stravin |
