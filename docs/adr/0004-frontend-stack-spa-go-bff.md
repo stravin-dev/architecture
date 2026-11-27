@@ -136,6 +136,48 @@ The SPA architecture directly supports the dense interactive surfaces specified 
     - `1024-1439px` (compact desktop: standard two-column PR/run layouts).
     - `>=1440px` (wide desktop: full-width side-by-side diffs and expanded DAG canvas).
 
+#### Pluggable Diff Renderer Seam (`packages/review/src/diff/`)
+
+To support code diffs at launch, image diffs in Phase 2, and future rich file types (Markdown, CSV/tabular, structural JSON/YAML, sandboxed SVG, notebooks, PDF) without modifying the PR Review shell or Core Git API, `packages/review/src/diff/` defines a priority-ordered `DiffRenderer` registry:
+
+```ts
+export interface DiffFileDescriptor {
+  path: string;
+  oldPath?: string;
+  changeKind: "add" | "modify" | "delete" | "rename";
+  mimeType: string;
+  extension: string;
+  isBinary: boolean;
+  oldBlobOid?: string;
+  newBlobOid?: string;
+  oldSizeBytes: number;
+  newSizeBytes: number;
+  hunks: DiffHunk[]; // empty ([]) for binary / non-text files
+}
+
+export interface DiffRendererProps {
+  file: DiffFileDescriptor;
+  viewMode: string;
+  blobUrl: (blobOid: string) => string; // stravin-web BFF blob proxy URL
+  onComment: (anchor: LineAnchor | RegionAnchor | FileAnchor) => void;
+}
+
+export interface DiffRenderer {
+  id: string;
+  priority: number; // highest matching priority wins; BinaryMetadataRenderer is lowest fallback
+  matches: (file: DiffFileDescriptor) => boolean;
+  capabilities: {
+    inlineComments: "line" | "region" | "file-only";
+    viewModes: string[];
+  };
+  load: () => Promise<{ default: ComponentType<DiffRendererProps> }>;
+}
+```
+
+- **Zero-Cost Lazy Chunks (Vite Code-Splitting):** Each `DiffRenderer.load()` wraps a dynamic `import()` so Vite emits an isolated chunk per renderer. Pure code PRs never download image diffing, notebook, or PDF codec bundles.
+- **Uniform Shell Chrome:** The Review shell owns the file-card header (path, `+N / -M` or byte delta, `capabilities.viewModes` pill, `Viewed` checkbox, `Raw` link) and mounts the matched renderer inside the body slot.
+- **Security Invariant (BFF Blob Proxy & Sandboxed Rendering):** Binary, image, SVG, and document blobs are fetched exclusively through `stravin-web`'s authenticated blob proxy (`GET /api/v1/repos/{tenant}/{repo}/blobs/{oid}` backed by `GitData.GetBlob`) with `X-Content-Type-Options: nosniff`, strict CSP (`default-src 'none'; sandbox`), and sandboxed rendering (`<img />`, `<canvas>`, or `sandbox=""` iframe) so inline `<script>` inside SVGs or HTML files can never execute in the application origin.
+
 ### 5. Strict Security Headers & Content Boundaries
 
 `stravin-web` enforces defense-in-depth browser security controls on every response:
