@@ -1,8 +1,45 @@
 # Local Development with Docker Compose & Floci
 
-Stravin Core is designed to run completely locally without live AWS accounts, shared staging environments, or cloud credentials. Developers spin up the full Go daemon suite (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, and `stravin-hook`) via **Docker Compose**, backed by **Floci** for local AWS service emulation, **Valkey** for the hot external full-clone pack response cache, and an optional OpenTelemetry / Grafana LGTM + `valkey-exporter` profile for end-to-end observability.
+Stravin runs completely locally without live AWS accounts, shared staging environments, or cloud credentials. Full-stack local development uses **three Docker Compose stacks** (`stravin-dev/observability`, `stravin-dev/core`, and `stravin-dev/platform`) backed by **Floci** for local AWS emulation, **Valkey** for hot caching, **NATS JetStream** for event streaming, **Postgres** and **Temporal** for Platform state/workflows, and a shared **OpenTelemetry + Grafana LGTM** observability stack.
 
 Tool versions in `stravin-dev/core` are pinned via `asdf` (`.tool-versions`), including **Go `1.26`** (`golang 1.26.11`), `golangci-lint`, `pre-commit`, and `make`.
+
+## 3-Stack Local Startup Order & Ports
+
+Start the three repositories in dependency order so the shared Docker networks (`stravin-obs` and `core_stravin-net`) and backing stores are ready before dependent services connect:
+
+1. **Observability (`stravin-dev/observability`):** Creates the shared `stravin-obs` network and starts `otel-gateway`, Prometheus, Tempo, Loki, and Grafana (`http://localhost:3001`).
+    ```bash
+    cd ../observability && make up
+    ```
+2. **Core (`stravin-dev/core`):** Creates `core_stravin-net`, joins `stravin-obs`, starts Floci, Valkey, NATS JetStream, all five Core daemons (`stravin-edge`, `stravin-node`, `stravin-pack`, `stravin-ctrl`, `stravin-relay`), and `core-otel-collector` (`valkey-exporter` + `nats-exporter`).
+    ```bash
+    cd ../core && docker compose up -d
+    ```
+3. **Platform (`stravin-dev/platform`):** Joins `core_stravin-net` and `stravin-obs`, starts Postgres, `postgres-exporter`, Temporal dev server, all 8 Platform services (`stravin-web`, `stravin-auth`, `stravin-review`, `stravin-run`, `stravin-gate`, `stravin-index`, `stravin-webhooks`, `stravin-notify`), and `platform-otel-collector`.
+    ```bash
+    cd ../platform && docker compose up -d
+    ```
+
+!!! note "Running Core or Platform Without Observability"
+    Both `core-otel-collector` and `platform-otel-collector` export to `otel-gateway:4317` through bounded non-blocking queues. If you skip Step 1, Core and Platform still boot and serve traffic normally once the `stravin-obs` network exists.
+
+### Local Endpoints & Ports
+
+| Service | Stack | Host URL / Port | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Grafana UI** | `observability` | `http://localhost:3001` | Consolidated health-tree dashboards & Explore (anonymous Admin; `:3001` avoids colliding with `stravin-web`) |
+| **Prometheus** | `observability` | `http://localhost:9090` | Metrics storage, OTLP receiver, remote-write receiver, and exemplars |
+| **Tempo** | `observability` | `http://localhost:3200` | Distributed tracing + service-graph / span-metrics generator |
+| **Loki** | `observability` | `http://localhost:3100` | Structured log aggregation (native OTLP ingestion) |
+| **OTel Gateway** | `observability` | `localhost:4317` (gRPC), `localhost:4318` (HTTP) | Central OTLP receiver for `core-otel-collector` and `platform-otel-collector` |
+| **Git Smart HTTP / SSH** | `core` | `http://localhost:8080`, `localhost:2222` | `stravin-edge` Git ingress |
+| **Floci (AWS Emulator)** | `core` | `http://localhost:4566` | Local S3, DynamoDB, DynamoDB Streams, and KMS |
+| **NATS JetStream** | `core` | `localhost:4222` (client), `http://localhost:8222` (monitor) | `STRAVIN_CORE` and `STRAVIN_AUTH` event streams |
+| **Stravin Web (SPA + BFF)** | `platform` | `http://localhost:3000` | Web UI, API gateway, and browser trace proxy (`POST /api/v1/telemetry/traces`) |
+| **Temporal UI / gRPC** | `platform` | `http://localhost:8233` (UI), `localhost:7233` (gRPC) | Local durable workflow engine for `stravin-run` and `stravin-gate` |
+| **Postgres** | `platform` | `localhost:5432` | Multi-schema relational store for Platform services |
+| **Platform Service APIs** | `platform` | `http://localhost:8091`–`8097` | Direct health/API ports (`auth` `:8091`, `review` `:8092`, `run` `:8093`, `gate` `:8094`, `webhooks` `:8095`, `notify` `:8096`, `index` `:8097`) |
 
 ## Purpose & Scope
 
@@ -29,31 +66,31 @@ flowchart TB
         Bootstrap["floci-init (One-shot Bucket/Table/KMS + demo,repo-1..repo-3 Seed)"]
         Floci[("Floci AWS Emulator (:4566)\nS3 (persistent) | DynamoDB | Streams | KMS")]
 
-        subgraph Telemetry["Optional Profile: --profile telemetry"]
-            Otel["OTel Collector (:4317 / :4318)"]
+        subgraph Telemetry["Core Collector -> stravin-dev/observability (stravin-obs)"]
+            CoreOtel["core-otel-collector (:4317 / :4318)"]
             VExp["valkey-exporter (:9121)"]
-            LGTM["Prometheus + Loki + Tempo"]
-            Grafana["Grafana UI (:3000)\n3 Dashboards"]
-            Otel --> LGTM
-            VExp --> LGTM
-            LGTM --> Grafana
+            NExp["nats-exporter (:7777)"]
+            ObsGw["otel-gateway (:4317) -> LGTM\nGrafana UI (:3001)"]
+            VExp --> CoreOtel
+            NExp --> CoreOtel
+            CoreOtel --> ObsGw
         end
 
-        Edge <--> Valkey
+        Edge --> Valkey
         Valkey -.-> VExp
         Edge --> Node
         Node -->|"PutObject / GetObject"| Floci
         Node -->|"TransactWriteItems / Query"| Floci
-        Pack <-->|"Lease / Compact / GC"| Floci
-        Ctrl <-->|"Epoch / HeadObject Scrub"| Floci
+        Pack -->|"Lease / Compact / GC"| Floci
+        Ctrl -->|"Epoch / HeadObject Scrub"| Floci
         Floci -.->|"DynamoDB Streams"| Hook
         Bootstrap -.->|"Create Buckets, Tables, CMKs"| Floci
 
-        Edge -.->|"OTLP/gRPC"| Otel
-        Node -.->|"OTLP/gRPC"| Otel
-        Pack -.->|"OTLP/gRPC"| Otel
-        Ctrl -.->|"OTLP/gRPC"| Otel
-        Hook -.->|"OTLP/gRPC"| Otel
+        Edge -.->|"OTLP/gRPC"| CoreOtel
+        Node -.->|"OTLP/gRPC"| CoreOtel
+        Pack -.->|"OTLP/gRPC"| CoreOtel
+        Ctrl -.->|"OTLP/gRPC"| CoreOtel
+        Hook -.->|"OTLP/gRPC"| CoreOtel
     end
 
     Client --> Edge
@@ -84,7 +121,7 @@ A one-shot `floci-init` container runs after Floci passes its health check and b
 
 `stravin-dev/core` ships three Compose stacks:
 
-- `docker-compose.yml` — Single-region local stack with Floci (S3 persistent storage mode backed by `floci-data`), Valkey (`valkey/valkey:8-alpine`, `128mb`, `allkeys-lfu`), all five Go daemons, and `--profile telemetry` (OTel Collector, `valkey-exporter`, Prometheus, Loki, Tempo, Grafana).
+- `docker-compose.yml` — Single-region local stack with Floci (S3 persistent storage mode backed by `floci-data`), Valkey (`valkey/valkey:8-alpine`, `128mb`, `allkeys-lfu`), NATS JetStream, all five Go daemons, `valkey-exporter`, `nats-exporter`, and `core-otel-collector` forwarding to `stravin-dev/observability` over `stravin-obs`.
 - `docker-compose.multi-region.yml` — Dual-Floci (`us-east-1` + `us-west-2`), dual-Valkey (`valkey-east`, `valkey-west`), and `floci-test-s3-sync` / `floci-test-ddb-sync` (`make multi-region-up`, `make multi-region-e2e`).
 - `docker-compose.chaos.yml` — Single-region stack with Toxiproxy fault proxies interposed on ingress, gRPC, and Floci links (`make chaos-up`, `make load-test`, `make chaos-e2e`).
 
@@ -156,7 +193,7 @@ services:
       STRAVIN_PACK_CACHE_VALKEY_MAX_ENTRY_BYTES: "8388608"
       STRAVIN_PACK_CACHE_S3_MAX_ENTRY_BYTES: "67108864"
       AWS_ENDPOINT_URL: "http://floci:4566"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://core-otel-collector:4317"
 
   stravin-node:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -178,7 +215,7 @@ services:
       STRAVIN_GIT_PACK_COMPRESSION: "1"
       STRAVIN_GIT_PACK_ALLOW_REUSE: "multi"
       AWS_ENDPOINT_URL: "http://floci:4566"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://core-otel-collector:4317"
     volumes:
       - node-nvme-cache:/var/lib/stravin/cache
 
