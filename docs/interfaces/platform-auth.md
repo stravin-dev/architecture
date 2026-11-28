@@ -263,6 +263,15 @@ Adding a human member to a multi-member organization is always a **two-step, ema
     - `DELETE /v1/orgs/{org}/invitations/{id}` — Immediately revokes a pending invitation so its token can no longer be accepted.
     - `POST /v1/orgs/{org}/invitations/{id}/resend` — Rotates the single-use token hash, extends the TTL, and emits a fresh `auth.org.invite_created` event (rate-limited per invitation/org).
 
+### 4.9 Bounded Nested Organizations & Cross-Cutting Team Overlays — *Proposed Contract (vNext)*
+
+See [ADR-0006: Bounded Nested Organizations, Monotonic Inheritance, and Cross-Cutting Team Overlays](../adr/0006-nested-orgs-and-team-overlays.md) for the full architectural specification. Summary of contract extensions on `stravin-auth`:
+
+- **Bounded Hierarchy (`auth.organizations`):** Multi-member organizations (`is_personal = false`) support bounded nesting via `parent_id`, `depth` (`CHECK (depth >= 0 AND depth <= 3)`, configurable up to `4`), unique `(tenant_id, full_path)`, and GIN-indexed materialized `ancestor_ids TEXT[]`. Personal organizations (`is_personal = true`) remain strictly leaf-only (`parent_id IS NULL`, `depth = 0`, no children).
+- **Cross-Cutting Team Overlays (`auth.team_role_bindings`):** `auth.org_teams` and `auth.org_team_members` bind cross-cutting groups (e.g., infosec, auditors, SRE) directly to specific `repo` or `org` targets via `auth.team_role_bindings` (`tenant_id`, `id`, `team_id`, `target_type`, `target_id`, `role`).
+- **Single-Query Monotonic RBAC (`GetEffectiveRole` & `FilterPrincipals`):** Coarse RBAC evaluation (`/v1/auth/rbac/filter` and internal `GetEffectiveRole`) computes `MAX(role)` across ancestor org memberships (`ancestor_ids`), target org membership, direct repo bindings, and `team_role_bindings` in a single indexed SQL query (no recursive CTE, no child deny/downgrade overrides), returning provenance metadata for UI badges.
+- **Role-Change & Route-Invalidation Events:** Mutations to `auth.org_team_members` and `auth.team_role_bindings` emit `stravin.auth.<tenant_id>.principal.role_changed` (`auth.principal.role_changed`); sub-org moves, renames, and delete cascades emit lifecycle events so `stravin-edge` evicts its Valkey `full_path -> (root_tenant_id, repo_id)` route cache and downstream services cascade deletions.
+
 ```mermaid
 sequenceDiagram
     participant Admin as Org Owner / Admin
