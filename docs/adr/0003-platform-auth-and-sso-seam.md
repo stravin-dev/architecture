@@ -91,6 +91,17 @@ flowchart TB
 - **Valkey `jti` Revocation Deny-List:** Shared low-latency revocation store keyed by `(tenant_id, jti)` with TTL matching the token's remaining lifetime.
 - **Coarse Org/Repo RBAC:** Authoritative mapping of `(principal, tenant_id, repo_id, role/scopes)` across canonical roles (`owner`, `admin`, `maintainer`, `write`, `read`) and fine-grained scopes.
 
+#### 1.1 Unified Ownership: Personal Orgs vs. Multi-Member Orgs
+
+Stravin unifies repository ownership under a single **Organization** model so authorization, routing, and storage namespaces never branch between separate user-owned and org-owned code paths:
+
+- **Personal Organizations (`is_personal = true`):** Every registered user is automatically provisioned an implicit personal organization whose `slug` equals the user's `username`, with a single `owner` membership bound to that user.
+    - Creating a personal repository creates it inside that user's personal organization (`/{username}/{repo}`).
+    - The web UI renders `is_personal = true` organizations with the **User Profile** view as a special case (bio, heatmap, activity timeline, and personal repositories) rather than exposing multi-member `People` or `Teams` tabs.
+    - Personal organizations cannot be independently deleted via `DELETE /v1/orgs/{org}`; their lifecycle is bound strictly to the owning user's account deletion flow.
+- **Multi-Member Organizations (`is_personal = false`):** Explicitly created organizations hold multiple members with coarse RBAC roles (`read`, `write`, `maintainer`, `admin`, `owner`), teams, pending email-verified invitations, and organization-scoped repositories (`/{org}/{repo}`).
+    - Multi-member organizations enforce **Last-Owner Protection** (at least one active `owner` must always remain) and a **Double-Verified Delete Cascade** for destructive removal (detailed in [Platform Products ⟷ Stravin Auth](../interfaces/platform-auth.md)).
+
 ### 2. Pluggable Enterprise Seams (`IdentityProvider` + `DirectorySyncAdapter`)
 
 All external enterprise identity and provisioning protocols plug behind **two** internal adapter seams inside `stravin-auth`. Because every downstream product (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`, `Notify`) consumes only `stravin-auth`-minted JWTs and `STRAVIN_AUTH` JetStream events, **zero IdP- or broker-specific code exists outside `stravin-auth`**:
