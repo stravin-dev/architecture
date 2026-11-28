@@ -68,13 +68,19 @@ The Stravin web application shell is **full width (`width: 100%`)** with zero cr
 ```mermaid
 flowchart TD
     Top["Global Top Bar (Stravin Mark · Org/Repo · Index Search · Inbox · Profile)"]
+    Top --> Profiles["Profiles (User & Organization)"]
     Top --> Tabs["Repository Tab Bar"]
+
+    Profiles --> UserProfile["User Profile (Pinned · 52-Week Heatmap · Activity)"]
+    Profiles --> OrgProfile["Org Profile (Pinned · Filterable Repos · People · Languages)"]
 
     Tabs --> Code["Code (Core + Index)"]
     Tabs --> PRs["Pull Requests (Review)"]
     Tabs --> Actions["Actions (Run)"]
     Tabs --> Queue["Merge Queue (Gate)"]
     Tabs --> Settings["Settings (Auth · Gate · Webhooks · Notify)"]
+
+    Code --> RepoOverview["Repository Overview (Branch Switcher · File Tree · Verified Commit · README · About)"]
 
     PRs --> PRList["PR List (Open · Queued · Draft · Stack Filter)"]
     PRList --> PRDetail["PR Detail (Stack Strip · Diff + Index Hover · Gate Merge Box)"]
@@ -88,6 +94,8 @@ flowchart TD
 
 ## Screen Specifications
 
+- [Profiles (`User` & `Organization`)](profiles.md) — User profile sidebar, pinned repositories, 52-week Strata Teal contribution heatmap, activity timeline, and organization overview with filterable repository list and RBAC visibility rules.
+- [Repository Overview (`Code`)](repository-overview.md) — Shared repository shell, branch/tag switcher, `Go to file`, Strata Teal `Clone` CTA, GPG/SSH `Verified` latest commit bar, file tree, sanitized `README.md` preview, and `About` rail.
 - [Pull Requests (`Stravin Review`)](pull-requests.md) — PR list, stacked diff navigation, inline `Index` symbol hover, and the unified Checks & Gate merge box.
 - [Actions & Workflows (`Stravin Run`)](actions-runs.md) — Workflow run list, runner pool visibility (`Hosted` vs `External OIDC`), visual Temporal Job DAG, `tree_oid` verdict reuse, and live streaming logs.
 - [Settings (`Auth`, `Gate`, `Webhooks`, `Notify`, `Runners`)](settings.md) — Progressive-disclosure configuration for branch protection, Merge Queue batches, standalone vs SSO add-on (`stravin-auth`), external webhook redelivery (`stravin-webhooks`), and user notifications (`stravin-notify`).

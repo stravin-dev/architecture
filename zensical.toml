@@ -32,6 +32,8 @@ nav = [
   ] },
   { "UI Design" = [
     { "Overview & Shell" = "ui/index.md" },
+    { "Profiles (User & Org)" = "ui/profiles.md" },
+    { "Repository Overview (Code)" = "ui/repository-overview.md" },
     { "Pull Requests" = "ui/pull-requests.md" },
     { "Actions & Workflows" = "ui/actions-runs.md" },
     { "Settings" = "ui/settings.md" },
