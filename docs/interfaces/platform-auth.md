@@ -231,6 +231,59 @@ WorkOS-Signature: t=1795644311, v1=8f4c2a1b9e...
     - Normalizes `dsync.user.created` / `dsync.user.updated` -> `UpsertUser`, `dsync.user.deleted` -> `DeactivateUser`, `dsync.group.created` / `dsync.group.updated` / `dsync.group.user_added` -> `SyncGroup`, and `dsync.group.user_removed` -> `RemoveGroupMember`.
 - **Identical Revocation & RBAC Pipeline:** Both native SCIM 2.0 and WorkOS Directory Sync events execute the exact same internal handler: `DeactivateUser` synchronously suspends the principal, revokes web sessions/PATs/SSH keys, writes Valkey `jti` deny-list / `rev_epoch` entries, and publishes `stravin.auth.<tenant_id>.principal.revoked`; `SyncGroup` / `RemoveGroupMember` updates coarse RBAC and publishes `stravin.auth.<tenant_id>.principal.role_changed`.
 
+### 4.7 Organization Lifecycle & Safety Invariants — *Proposed Contract (vNext)*
+
+Every repository belongs to an organization—either a user's implicit **Personal Organization** (`is_personal = true`, `slug = username`, sole `owner` = user) or an explicit **Multi-Member Organization** (`is_personal = false`). Organization lifecycle mutations enforce three non-negotiable safety invariants:
+
+- **Create Organization (`POST /v1/orgs`):**
+    - Any authenticated user can create a multi-member organization (`is_personal = false`) by providing a unique `slug`, `display_name`, and optional `description`.
+    - Within a single Postgres transaction, `stravin-auth` inserts the organization record and atomically assigns the creating user the `owner` role in `org_memberships`.
+- **Last-Owner Protection (`PATCH /v1/orgs/{org}/members/{user}`, `DELETE /v1/orgs/{org}/members/{user}`):**
+    - An `owner` can demote themselves (e.g., to `admin`, `maintainer`, `write`, or `read`) or remove themselves from an organization **only if at least one other active `owner` exists** in that organization.
+    - Enforced atomically inside a Postgres transaction (locking the organization's `owner` rows with `SELECT ... FOR UPDATE` before applying the update or delete). If the caller is the sole active `owner`, `stravin-auth` rejects the request with `409 Conflict` (`FAILED_PRECONDITION: LAST_OWNER_REQUIRED`).
+- **Delete Organization Cascade (`DELETE /v1/orgs/{org}`):**
+    - Restricted to `owner` principals only and **blocked for personal organizations (`is_personal = true`)**, whose lifecycle is tied to account deletion (`409 Conflict` / `FAILED_PRECONDITION: PERSONAL_ORG_CANNOT_BE_DELETED`).
+    - Requires **double verification**:
+        1. Explicit typed confirmation in the request body matching the exact organization slug (`confirm_org_slug == org.slug`).
+        2. Fresh re-authentication / valid CSRF token verified by the Go BFF (`stravin-web`) and `stravin-auth`.
+    - On verification, `stravin-auth` marks the organization deleted, revokes org-scoped memberships and pending invitations, and emits `stravin.auth.<tenant_id>.org.deleted` (`auth.org.deleted`).
+    - Downstream consumers (`stravin-review`, `stravin-core`, `stravin-index`, `stravin-webhooks`, `stravin-notify`) cascade deletion across all repositories in the organization—removing both platform metadata and Core Git storage.
+
+### 4.8 Email-Verified Organization Invitations — *Proposed Contract (vNext)*
+
+Adding a human member to a multi-member organization is always a **two-step, email-verified** flow so users cannot be silently added to arbitrary organizations without consent:
+
+- **`POST /v1/orgs/{org}/invitations`:** Caller must hold `owner` or `admin` role (only an `owner` may invite with role `owner`). Accepts `email` (or `username` resolved to verified primary email) and target `role` (`read`, `write`, `maintainer`, `admin`, `owner`).
+    - Generates a high-entropy single-use token, stores only its SHA-256 hash in `org_invitations` with a finite TTL (default `7 days`), and publishes `stravin.auth.<tenant_id>.org.invite_created` (`auth.org.invite_created`) so `stravin-notify` dispatches the transactional invitation email.
+    - **Zero Premature Membership:** The invitee is **NOT** added to `org_memberships` and gains zero repository access until they explicitly accept the emailed link.
+- **`POST /v1/invitations/{token}/accept`:** Invitee authenticates as a user whose verified email matches the invitation's target email (or signs up and verifies that email), then submits the raw single-use token.
+    - `stravin-auth` verifies the SHA-256 hash, checks non-expired / non-revoked / unused status, inserts the `org_memberships` row atomically inside a Postgres transaction, marks the invitation `accepted`, and publishes `stravin.auth.<tenant_id>.principal.role_changed`.
+- **Listing, Revocation & Resend:**
+    - `GET /v1/orgs/{org}/invitations` — Lists pending invitations (email, role, inviter, created/expiry timestamps; never returns the raw token).
+    - `DELETE /v1/orgs/{org}/invitations/{id}` — Immediately revokes a pending invitation so its token can no longer be accepted.
+    - `POST /v1/orgs/{org}/invitations/{id}/resend` — Rotates the single-use token hash, extends the TTL, and emits a fresh `auth.org.invite_created` event (rate-limited per invitation/org).
+
+```mermaid
+sequenceDiagram
+    participant Admin as Org Owner / Admin
+    participant Auth as Stravin Auth (stravin-auth)
+    participant NATS as NATS JetStream (STRAVIN_AUTH)
+    participant Notify as Stravin Notify (stravin-notify)
+    participant Invitee as Invitee (Email + Browser)
+
+    Admin->>Auth: POST /v1/orgs/{org}/invitations (email, role)
+    Auth->>Auth: Store hashed single-use token (TTL 7d); do NOT add org_memberships
+    Auth->>NATS: Publish stravin.auth.<tenant_id>.org.invite_created
+    Auth-->>Admin: 201 Created (invitation_id, status=pending)
+    NATS-->>Notify: Consume auth.org.invite_created (bypass digest/quiet hours)
+    Notify->>Invitee: Send transactional email (accept URL, org, inviter, role, expiry)
+    Invitee->>Auth: Authenticate as matching verified email
+    Invitee->>Auth: POST /v1/invitations/{token}/accept
+    Auth->>Auth: Verify hash + TTL + email match; insert org_memberships atomically
+    Auth->>NATS: Publish stravin.auth.<tenant_id>.principal.role_changed
+    Auth-->>Invitee: 200 OK (org membership active)
+```
+
 ## 5. Asynchronous Events & Streams
 
 `stravin-auth` publishes tenant-scoped security and revocation events to the **`STRAVIN_AUTH`** NATS JetStream stream (`stravin.auth.>`):
@@ -240,6 +293,8 @@ WorkOS-Signature: t=1795644311, v1=8f4c2a1b9e...
 | `stravin.auth.<tenant_id>.principal.revoked` | `auth.principal.revoked` | Core (`stravin-edge`), Review, Run, Index, Gate, Webhooks, Notify | Instant session/PAT/SSH cache eviction, WS/SSE disconnect, pending digest cancellation |
 | `stravin.auth.<tenant_id>.principal.role_changed` | `auth.principal.role_changed` | Review, Index, Gate, Notify | Invalidate cached repo/org role snapshots after RBAC or SCIM group update |
 | `stravin.auth.<tenant_id>.security.alert` | `auth.security.alert` | Notify, Webhooks (optional audit) | Trigger user/admin notifications (new PAT, passkey removed, SSO config changed, suspicious login) |
+| `stravin.auth.<tenant_id>.org.invite_created` | `auth.org.invite_created` | Notify | Deliver immediate transactional organization invitation email (accept URL, org, inviter, role, expiry) |
+| `stravin.auth.<tenant_id>.org.deleted` | `auth.org.deleted` | Core, Review, Index, Webhooks, Notify | Cascade deletion to all repositories in the deleted organization (platform metadata and Core Git storage) |
 | `stravin.auth.<tenant_id>.jwks.rotated` | `auth.jwks.rotated` | All Services | Proactive JWKS cache refresh hint during key rotation |
 
 Example `principal.revoked` envelope:
@@ -283,6 +338,9 @@ Example `principal.revoked` envelope:
 | **SSO login matches existing local email with `email_verified=false`** | Hard reject with `409 ACCOUNT_LINK_REQUIRED`; audit event logged; local account untouched. | Zero retries; non-retryable security rejection. |
 | **Duplicate SCIM or WorkOS Directory Sync webhook** | Idempotent on `(tenant_id, idp_id, event_id)` / `(tenant_id, idp_id, external_sub)` and JetStream `Nats-Msg-Id`; `revocation_epoch` increments monotonically only on state change. | At-least-once event propagation; idempotent consumers. |
 | **Invalid WorkOS webhook signature or stale timestamp (`> 5m`)** | Hard reject with `401 UNAUTHORIZED` before parsing payload; audit counter incremented; no directory mutation applied. | Zero retries; non-retryable security rejection. |
+| **Sole `owner` attempts self-demotion or self-removal** | Atomic Postgres transaction lock detects `active_owner_count == 1`; rejects with `409 Conflict` (`FAILED_PRECONDITION: LAST_OWNER_REQUIRED`). Organization never becomes ownerless. | Zero retries; caller must assign another `owner` first. |
+| **Org delete on `is_personal = true` or mismatched `confirm_org_slug`** | Rejects personal-org deletion (`409 Conflict`) and slug mismatch / missing re-auth (`400 Bad Request` / `403 Forbidden`) with zero metadata or Core Git storage mutation. | Zero retries; non-retryable safety guard. |
+| **Expired, revoked, or email-mismatched org invitation acceptance** | Rejects `POST /v1/invitations/{token}/accept` (`410 Gone` / `403 Forbidden`); `org_memberships` remains untouched. | Zero retries; admin must resend or issue a new invitation. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
 
@@ -294,6 +352,7 @@ Example `principal.revoked` envelope:
 - [ ] Enforce no auto-linking to unverified local emails and constant-time `tenant_id` checks on every route.
 - [ ] Write `jti` revocations and `rev_epoch` to Valkey and publish `stravin.auth.<tenant_id>.principal.revoked` on SCIM deactivation, suspension, or role downgrade.
 - [ ] Serve `/.well-known/jwks.json`, `/v1/auth/sts/exchange`, `/v1/auth/ssh/resolve`, and `/v1/auth/rbac/filter`.
+- [ ] Enforce unified personal/multi-member org lifecycle (`POST /v1/orgs`, atomic last-owner protection, double-verified `DELETE /v1/orgs/{org}` emitting `auth.org.deleted`, and email-verified single-use org invitations emitting `auth.org.invite_created`).
 
 ### Side B: Consuming Platform Services (`Core`, `Review`, `Run`, `Index`, `Gate`, `Webhooks`, `Notify`)
 

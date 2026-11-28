@@ -2,6 +2,13 @@
 
 Stravin's User and Organization Profile screens provide fast orientation across people, teams, pinned repositories, and recent engineering activity while keeping private repositories and restricted activity strictly RBAC-scoped.
 
+## Unified Ownership Model (Personal Orgs vs. Multi-Member Orgs)
+
+Every Stravin user automatically receives an implicit **Personal Organization** (`is_personal = true`, `slug = username`, sole `owner` = the user). All repositories live inside an organization namespace (`/{owner}/{repo}`):
+
+- **Personal Organization (`is_personal = true`):** Rendered with the **User Profile** layout as a special case—showing bio, avatar, signing key badge, 52-week contribution heatmap, and activity timeline instead of multi-member `People` or `Teams` management tabs. Creating a personal repository places it inside the user's personal organization.
+- **Multi-Member Organization (`is_personal = false`):** Rendered with the **Organization Profile** layout—exposing `People`, `Teams`, `Settings`, email-verified member invitations, and multi-owner RBAC (`read`, `write`, `maintainer`, `admin`, `owner`).
+
 ## User Profile (`/:username`)
 
 ![Stravin User Profile mockup](assets/user-profile.png)
@@ -30,6 +37,31 @@ Stravin's User and Organization Profile screens provide fast orientation across 
     - **Top Languages Card:** Proportional multi-segment language bar and percentage table aggregated across repositories visible to the viewer.
     - **Verified Domain & Auth Card:** Displays DNS domain verification status and active `stravin-auth` posture (standalone local auth plus optional OIDC/SCIM add-on).
 
+## Creation & Invitation Flows
+
+### `+ New Repository` Flow
+
+Accessible from the top navigation `+` menu, User Profile, and Organization Profile headers:
+
+- **Owner Selector:** Defaults to the signed-in user's personal organization (`is_personal = true`) or the active organization context, and lists only multi-member organizations where the user holds repository creation permission.
+- **Repository Fields:** Repository `name` (URL slug validation), optional `description`, visibility selector (`Public` or `Private`), configurable `default_branch` (default `main`), and optional initialization toggles (`Add a README file`, `Choose a license`).
+- **Submission:** Calls the Go BFF (`stravin-web`), which creates platform metadata in `stravin-review` and initializes Git storage in `stravin-core` under the chosen organization namespace (`/{owner}/{repo}`).
+
+### `+ New Organization` Flow
+
+Accessible from the top navigation `+` menu and the User Profile Organizations card:
+
+- **Organization Fields:** Unique `slug` (URL handle), `display_name`, and optional `description`.
+- **Ownership Assignment:** Submits `POST /v1/orgs` via `stravin-web` -> `stravin-auth`; the creating user is atomically assigned the `owner` role (`is_personal = false`) and redirected to the new Organization Profile.
+
+### `Invite member` Flow (Org Profile / `People` Tab)
+
+Available to organization `owner` and `admin` principals on multi-member organizations (`is_personal = false`):
+
+- **Send Invitation Modal (`Invite member`):** Accepts target `email` (or existing `@username`) and RBAC `role` (`read`, `write`, `maintainer`, `admin`, `owner`; only an `owner` can invite another `owner`). Submitting calls `POST /v1/orgs/{org}/invitations`; the invitee is **not** added to `org_memberships` until email acceptance.
+- **Pending Invitations List (`People` Tab):** Displays all pending invitations (`GET /v1/orgs/{org}/invitations`) with target email, role pill, inviter, and expiration timestamp, paired with inline **`Resend`** (`POST /v1/orgs/{org}/invitations/{id}/resend`) and **`Revoke`** (`DELETE /v1/orgs/{org}/invitations/{id}`) actions.
+- **Invite Acceptance Screen (`/invitations/:token`):** Opened from the transactional email delivered by `stravin-notify`. Shows the target organization, inviter, assigned role, and expiration; requires the viewer to be authenticated with a verified email matching the invitation before enabling **`Accept invitation`** (`POST /v1/invitations/{token}/accept`).
+
 ## RBAC & Visibility Rules
 
 Profile endpoints enforce server-side authorization inside the Go BFF (`stravin-web`) and `stravin-auth` before any repository metadata, heatmap counts, or timeline events leave the backend:
@@ -55,4 +87,4 @@ Profile endpoints enforce server-side authorization inside the Go BFF (`stravin-
 
 - **Platform Auth (`stravin-auth`):** Resolves user/org identity, role memberships, GPG/SSH signing key badges, and DNS-verified organization domains ([Platform Auth](../interfaces/platform-auth.md), [ADR-0003](../adr/0003-platform-auth-and-sso-seam.md)).
 - **Web Frontend & Go BFF (`stravin-web`):** Aggregates RBAC-filtered repository lists, contribution heatmaps, and activity feeds without exposing internal service tokens to the browser ([ADR-0004](../adr/0004-frontend-stack-spa-go-bff.md)).
-- **Implementation Tracking:** Grounded against platform profile and navigation work items `stravin-dev/platform#31` and `stravin-dev/platform#33`.
+- **Implementation Tracking:** Grounded against platform profile and navigation work items (`stravin-dev/platform#31`, `stravin-dev/platform#33`) and Wave 6 org/repo lifecycle and invitation work items (`wave-6-org-repo-lifecycle`: `stravin-dev/platform#36`, `stravin-dev/platform#37`, `stravin-dev/platform#38`).

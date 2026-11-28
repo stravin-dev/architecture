@@ -132,6 +132,21 @@ Four built-in adapters:
 3. **Browser / Mobile Web Push (`web_push`):** Delivers compact, non-sensitive push payloads (title + deep link; no private diff bodies in third-party push relays) over VAPID, FCM, and APNs.
 4. **Chat Connectors (`slack`, `teams`, `discord`):** Delivers interactive cards and threaded replies via per-tenant OAuth/bot connectors, respecting channel-level and DM-level visibility rules.
 
+### 4.5 Transactional Organization Invitation Email — *Proposed Contract (vNext)*
+
+When `stravin-auth` emits `stravin.auth.<tenant_id>.org.invite_created` (`auth.org.invite_created`), `stravin-notify` delivers an immediate transactional email over the `email` `ChannelAdapter`:
+
+- **Required Payload Fields:**
+    - `accept_url` — Single-use HTTPS link pointing to the web invitation acceptance screen (`https://<host>/invitations/{token}`).
+    - `org_name` / `org_slug` — Display name and slug of the target organization.
+    - `inviter_name` / `inviter_handle` — Principal who issued the invitation.
+    - `role` — Assigned RBAC role upon acceptance (`read`, `write`, `maintainer`, `admin`, `owner`).
+    - `expires_at` — RFC 3339 expiration timestamp (default 7 days from issuance or resend).
+- **Security & Delivery Semantics:**
+    - **Bypasses Digest & Quiet Hours:** Treated as a high-priority security/transactional message—never buffered into hourly/daily digests or delayed by user quiet hours.
+    - **Pre-Membership Delivery:** Because the invitee is not yet in `org_memberships`, `stravin-notify` skips the `repo:read` visibility check and strictly limits email content to the invitation metadata above (zero private repository names, PR titles, or internal org activity).
+    - **Idempotency:** Deduplicated on `Nats-Msg-Id: <event_id>:<invitation_id>:email` so resends (which generate a new `event_id` and rotated token) send a fresh email while JetStream redeliveries never duplicate mail.
+
 ## 5. Asynchronous Events & Streams
 
 ### 5.1 Inbound NATS JetStream Subscriptions
@@ -144,7 +159,7 @@ Four built-in adapters:
 | `STRAVIN_REVIEW` | `stravin.review.>` | `notify-review-fanout` | PR ready for review, review requested, `@mention`, PR approved, changes requested, comment posted |
 | `STRAVIN_RUN` | `stravin.run.>` | `notify-run-fanout` | CI check failed (`check.completed` with failure/timed_out conclusion) |
 | `STRAVIN_GATE` | `stravin.gate.>` | `notify-gate-fanout` | Merge-queue eviction (`entry.evicted`), atomic merge (`entry.merged`) |
-| `STRAVIN_AUTH` | `stravin.auth.>` | `notify-auth-fanout` | Security/auth alerts (`security.alert`), instant session/digest purge (`principal.revoked`, `principal.role_changed`) |
+| `STRAVIN_AUTH` | `stravin.auth.>` | `notify-auth-fanout` | Security/auth alerts (`security.alert`), transactional org invitation emails (`org.invite_created`), instant session/digest purge (`principal.revoked`, `principal.role_changed`) |
 
 ### 5.2 Per-Channel Outbox & DLQ Isolation
 
@@ -158,7 +173,7 @@ Four built-in adapters:
 | :--- | :--- | :--- |
 | `notification_id` | `ntf_<ulid>` | Unique per persisted user notification |
 | `thread_key` | `{tenant_id}:{repo_id}:pr:{pr_id}` (or `:alert:{alert_id}`) | Deterministic grouping key for inbox collapsing, RFC 5322 `In-Reply-To`/`References`, and chat threads |
-| `trigger_type` | `<product>.<trigger>` (e.g., `review.mention`, `run.check_failed`, `gate.entry_evicted`, `auth.security_alert`) | Maps inbound JetStream events to user preference rules and templates |
+| `trigger_type` | `<product>.<trigger>` (e.g., `review.mention`, `run.check_failed`, `gate.entry_evicted`, `auth.security_alert`, `auth.org.invite_created`) | Maps inbound JetStream events to user preference rules and templates |
 | `deep_link_url` | `https://<tenant-host>/<tenant_id>/<repo_id>/...` | Canonical UI link rendered across inbox, email, push, and chat cards |
 | **Valkey Pub/Sub Channel** | `notify:user:{tenant_id}:{principal_id}` | Ephemeral fan-out for live browser popups and unread badge counts |
 
@@ -169,7 +184,7 @@ Four built-in adapters:
 | **User removed from repo or SCIM-deactivated before delivery / digest flush** | `stravin-auth` RBAC check returns denied (or `principal.revoked` arrives); `stravin-notify` drops notification silently, purges pending digest items, and closes WS/SSE stream. Zero private data leaked. | Non-retryable security drop; audited in metrics. |
 | **Email / Push / Chat provider returns `429` or `5xx`** | Per-channel outbox worker respects `Retry-After` and retries with exponential backoff + jitter (`2 s` -> `10 s` -> `1 m` -> `5 m`, max 6 attempts). Circuit breaker trips per provider/tenant connector; exhaustions route to `STRAVIN_NOTIFY_DLQ`. In-App Inbox remains 100% available. | Per-attempt timeout: `10 s`. |
 | **Notification storm (e.g., 50 matrix CI failures or force-push flood)** | Coalesce burst events by `(principal_id, thread_key, trigger_type)` within a short debounce window (`15 s`) and enforce per-user channel rate limits (e.g., max 20 emails/hour before auto-switching to digest summary). | Lossless in In-App Inbox; bounded on external channels. |
-| **Quiet hours active for recipient** | In-App Inbox records the item silently (no popup); Email, Push, and Chat deliveries are held until quiet hours end, then re-checked against `stravin-auth` RBAC before dispatch. Critical `auth.security_alert` events may bypass quiet hours. | Re-evaluated at quiet-window exit. |
+| **Quiet hours active for recipient** | In-App Inbox records the item silently (no popup); Email, Push, and Chat deliveries are held until quiet hours end, then re-checked against `stravin-auth` RBAC before dispatch. Critical `auth.security_alert` and transactional `auth.org.invite_created` emails bypass quiet hours and digest batching. | Re-evaluated at quiet-window exit (immediate for security/transactional events). |
 | **Duplicate internal JetStream event** | Deduplicated via `Nats-Msg-Id: <event_id>:<principal_id>:<channel>` and unique DB constraint on `(event_id, principal_id)` for inbox persistence. | At-least-once ingestion; effectively-once inbox state. |
 
 ## 8. Meet-in-the-Middle Bridge Checklist
